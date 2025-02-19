@@ -1,0 +1,10 @@
+## Interface: 11200
+## Title: GuildBankster
+## Notes: Automatic GBank Stocking
+## X-Category: Interface Enhancements
+## X-Date: 2024-05-06
+## X-Website: https://github.com/MarcelineVQ/GuildBankster
+## Version: 1.0
+## SavedVariables: GuildBanksterDB
+
+GuildBankster.lua

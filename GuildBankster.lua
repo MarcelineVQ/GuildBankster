@@ -23,7 +23,7 @@ local in_range_npc = {
 }
 
 local function gb_print(msg)
-  DEFAULT_CHAT_FRAME:AddMessage(msg)
+  DEFAULT_CHAT_FRAME:AddMessage("|cff14a868GuildBankster:|r "..msg)
 end
 
 function getIDFromLink(link)
@@ -39,6 +39,7 @@ end
 
 function GuildBankster:Withdraw(tab,gbank_slot,bag,inv_slot,count)
   GuildBank:Send(format("WithdrawItem:%d:%d:%d:%d:%d",tab,gbank_slot,bag,inv_slot,count))
+  -- GuildBank:Send("WithdrawItem:" .. frame.tab .. ":" .. frame.slot .. ":0:0:" .. frame.count)
 end
 
 function GuildBankster:IsBankContainer(bag)
@@ -120,19 +121,27 @@ local CursorItem = nil
 local DraggedItem = nil
 local DraggedOrigin = nil
 
--- Hook PickupContainerItem to record the item data when an item is picked up.
-local OldPickupContainerItem = PickupContainerItem
-function PickupContainerItem(bag, slot,a3,a4,a5,a6,a7,a8,a9)
+local oldContainerFrameItemButton_OnClick = ContainerFrameItemButton_OnClick
+ContainerFrameItemButton_OnClick = function(button, ignoreModifiers,a4,a4,a5,a6,a7,a8,a9)
+  -- execute original onclick
+  local r = oldContainerFrameItemButton_OnClick(button, ignoreModifiers,a4,a4,a5,a6,a7,a8,a9)
 
-  CursorItem = nil
-  local itemLink = GetContainerItemLink(bag, slot)
-  if itemLink then
-  -- GetContainerItemInfo returns multiple values; assume count is the second.
-    local texture, count, locked, quality = GetContainerItemInfo(bag, slot)
-    CursorItem = { itemLink = itemLink, count = count > 0 and count or 1 }
+  if button == "LeftButton" then
+    local bag,slot = this:GetParent():GetID(), this:GetID()
+    if bag and slot then
+      local itemLink = GetContainerItemLink(bag, slot)
+      if itemLink then
+        -- GetContainerItemInfo returns multiple values; assume count is the second.
+        local texture, count, locked, quality = GetContainerItemInfo(bag, slot)
+        CursorItem = { itemLink = itemLink, count = count > 0 and count or 1 }
+        return
+      end
+    end
+    -- else
+    CursorItem = nil
+      -- GuildBank:ResetAction()
   end
-
-  OldPickupContainerItem(bag, slot,a3,a4,a5,a6,a7,a8,a9)
+  return r
 end
 
 -- Hook ClearCursor so that our stored CursorItem is cleared too.
@@ -156,9 +165,9 @@ function GetCursorItemCount()
     return 0
 end
 
-function CursorHasItem()
-    return CursorItem ~= nil
-end
+-- function CursorHasItem()
+    -- return CursorItem ~= nil
+-- end
 
 -- Extract the item ID from an itemLink.
 function getIDFromLink(link)
@@ -241,7 +250,7 @@ for tab = 1, 6 do
     -- btn.texture:SetVertexColor(0.2, 0.2, 0.2, 1)  -- Empty slot color.
 
     -- Create a font string to show the item count.
-    btn.countText = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    btn.countText = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     btn.countText:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -2, 2)
     
     -- Left-click deposits the cursor item into this slot.
@@ -373,22 +382,35 @@ for tab = 1, 6 do
 end
 
 --------------------------------------------------
--- OPTIONAL: PRINT LAYOUT BUTTON FOR TESTING --
+-- Control buttons
 --------------------------------------------------
 
-local printButton = CreateFrame("Button", "PrintBankLayoutButton", MockGuildBankFrame, "UIPanelButtonTemplate")
-printButton:SetWidth(100)
-printButton:SetHeight(25)
-printButton:SetText("Move")
-printButton:SetPoint("BOTTOMRIGHT", MockGuildBankFrame, "BOTTOMRIGHT", -5, 5)
-printButton:EnableMouse(true)
+-- button to drag frame with
+local moveButton = CreateFrame("Button", "PrintBankLayoutButton", MockGuildBankFrame, "UIPanelButtonTemplate")
+moveButton:SetWidth(100)
+moveButton:SetHeight(25)
+moveButton:SetText("Move")
+moveButton:SetPoint("BOTTOMRIGHT", MockGuildBankFrame, "BOTTOMRIGHT", -5, 5)
+moveButton:EnableMouse(true)
 -- printButton:SetMovable(true)
-printButton:RegisterForDrag("LeftButton")
-printButton:SetScript("OnDragStart", function()
+moveButton:RegisterForDrag("LeftButton")
+moveButton:SetScript("OnDragStart", function()
   this:GetParent():StartMoving()
 end)
-printButton:SetScript("OnDragStop", function()
+moveButton:SetScript("OnDragStop", function()
   this:GetParent():StopMovingOrSizing()
+end)
+
+local closeButton = CreateFrame("Button", "CloseBankLayoutButton", MockGuildBankFrame, "UIPanelButtonTemplate")
+closeButton:SetWidth(100)
+closeButton:SetHeight(25)
+closeButton:SetText("CloseAll")
+closeButton:SetPoint("BOTTOM", moveButton, "TOP", 0, 3)
+closeButton:EnableMouse(true)
+-- printButton:SetMovable(true)
+-- printButton:RegisterForDrag("LeftButton")
+closeButton:SetScript("OnClick", function()
+  MockGuildBankFrame:Hide()
 end)
 
 --------------------------------------------------
@@ -465,11 +487,66 @@ local depositFrame = CreateFrame("Frame")
 depositFrame.lastTime = 0
 depositFrame:SetScript("OnUpdate", function()
   this.lastTime = this.lastTime + arg1
-  if this.lastTime >= 0.2 then
+  if this.lastTime >= 0.4 then
     this.lastTime = 0
-    if table.getn(depositQueue) > 0 then
+    local size = table.getn(depositQueue)
+    if size > 0 then
       local action = table.remove(depositQueue, 1)
-      action()  -- Execute the deposit command.
+      action(size)  -- Execute the deposit command.
+    end
+  end
+end)
+
+local gbank_queue = {}
+local gbankQueueFrame = CreateFrame("Frame")
+gbankQueueFrame.wait_on = 0
+gbankQueueFrame.actions = {
+  print = "print",
+  deposit = "deposit",
+  withdrawSome = "withdrawSome",
+  withdrawAll = "withdrawAll",
+}
+
+gbankQueueFrame:RegisterEvent("BAG_UPDATE")
+gbankQueueFrame:SetScript("OnEvent", function ()
+  gbankQueueFrame:ProgressQueue()
+end)
+
+function gbankQueueFrame:ProgressQueue()
+  if not gbank_queue[1] then return end
+  if gbankQueueFrame.wait_on > 0 then
+    gbankQueueFrame.wait_on = gbankQueueFrame.wait_on - 1
+    return
+  end
+
+  local action = table.remove(depositQueue, 1)
+  if action.type == action.type == gbankQueueFrame.actions[print] then
+    gb_print(action.args[1])
+  end
+  if action.type == gbankQueueFrame.actions[deposit] then
+    GuildBankster:Deposit(unpack(action.args))
+    gbankQueueFrame.wait_on = 1 -- 1 update
+  end
+  if action.type == gbankQueueFrame.actions[withdrawSome] then
+    GuildBankster:Withdraw(unpack(action.args))
+    gbankQueueFrame.wait_on = 2 -- 2 update
+  end
+  if action.type == gbankQueueFrame.actions[withdrawAll] then
+    GuildBankster:Withdraw(unpack(action.args))
+    gbankQueueFrame.wait_on = 1 -- 1 update
+  end
+end
+
+
+depositFrame.lastTime = 0
+depositFrame:SetScript("OnUpdate", function()
+  this.lastTime = this.lastTime + arg1
+  if this.lastTime >= 0.4 then
+    this.lastTime = 0
+    local size = table.getn(depositQueue)
+    if size > 0 then
+      local action = table.remove(depositQueue, 1)
+      action(size)  -- Execute the deposit command.
     end
   end
 end)
@@ -518,7 +595,11 @@ end
 --------------------------------------------------
 local function RestockBank()
   local inventoryState = BuildInventoryState()  -- snapshot of your inventory
+  local missingItems = {}  -- table to record materials we couldn't fully restock
 
+  table.insert(depositQueue, function()
+    gb_print("Beginning Guildbank restock...")
+  end)
   for tab = 1, 6 do
     if not ignoredTabs[tab] then
       local currentItems = ScanGuildBank(tab)
@@ -527,8 +608,42 @@ local function RestockBank()
         if desired then
           local current = currentItems[slot]
           local missing = desired.count
-          if current and current.itemID == desired.itemID then
-            missing = desired.count - current.count
+          if current then
+            if current.itemID == desired.itemID then
+              missing = desired.count - current.count
+              if missing < 0 then
+                -- slot is occupied with wrong count, remove some
+                local t = tab
+                local s = slot
+                local difference = -missing
+                local item = current.itemID
+                table.insert(depositQueue, function(ix)
+                  -- partial removal requires use of specific bag slots
+                  for bag = 0, NUM_BAG_SLOTS do
+                    local numSlots = GetContainerNumSlots(bag)
+                    for slot = 1, numSlots do
+                      local itemLink = GetContainerItemLink(bag, slot)
+                      if not itemLink then
+                        GuildBankster:Withdraw(t, s, bag, slot, difference)
+                        print("withdraw from "..t.." slot "..s.." "..difference)
+                        return
+                      end
+                    end
+                  end
+                  gb_print("Tried to remove extra " .. GetItemInfo("item:"..item) .. " but had no empty bag space.")
+                end)
+                missing = 0
+              end
+            elseif current.count > 0 then
+              -- slot is occupied with wrong item, remove it
+              local t = tab
+              local s = slot
+              local c = current.count
+              table.insert(depositQueue, function(ix)
+                GuildBankster:Withdraw(t, s, 0, 0, c)
+                print("withdrawall from "..t.." slot "..s.." "..c)
+              end)
+            end
           end
           if missing > 0 then
             -- Loop until we've queued deposits for the entire missing amount.
@@ -541,13 +656,15 @@ local function RestockBank()
                 local b = bag
                 local i = inv_slot
                 local m = depositCount
-                table.insert(depositQueue, function()
-                  print(format("tab %i, slot %i, bag %i, inv_slot %i, depositing %i", t, s, b, i, m))
+                table.insert(depositQueue, function(ix)
+                  -- print(format("tab %i, slot %i, bag %i, inv_slot %i, depositing %i", t, s, b, i, m))
+                  -- gb_print(string.rep(".", math.min(ix,20)))
                   GuildBankster:Deposit(t, s, b, i, m)
                 end)
                 missing = missing - depositCount
               else
                 -- No more inventory available for this item.
+                missingItems[desired.itemID] = (missingItems[desired.itemID] or 0) + missing
                 break
               end
             end
@@ -555,6 +672,17 @@ local function RestockBank()
         end
       end
     end
+  end
+  table.insert(depositQueue, function()
+    gb_print("Guildbank restock finished.")
+  end)
+  if next(missingItems) then
+    table.insert(depositQueue, function()
+      gb_print("The following could not be restocked due to insufficient inventory:")
+      for itemID, count in pairs(missingItems) do
+        gb_print(string.format("%d : %s", count, GetItemInfo("item:"..itemID)))
+      end
+    end)
   end
 end
 
@@ -577,16 +705,10 @@ end)
 local hideButton = CreateFrame("Button", "HideBankButton", MockGuildBankFrame, "UIPanelButtonTemplate")
 hideButton:SetWidth(100)
 hideButton:SetHeight(25)
-hideButton:SetText("Toggle Template")
+hideButton:SetText("Hide Templates")
 hideButton:SetPoint("BOTTOM", MockGuildBankFrame, "BOTTOM", -100, 40)
 hideButton:SetScript("OnClick", function()
-  if _G["MockGuildBankTabFrame1"]:IsVisible() then
-    for i=1,6 do
-      _G["MockGuildBankTabFrame"..i]:Hide()
-    end
-  else
-    for i=1,6 do
-      _G["MockGuildBankTabFrame"..i]:Show()
-    end
+  for i=1,6 do
+    _G["MockGuildBankTabFrame"..i]:Hide()
   end
 end)

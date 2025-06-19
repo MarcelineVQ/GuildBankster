@@ -99,6 +99,7 @@ GuildBankster:RegisterEvent("BANKFRAME_OPENED")
 GuildBankster:RegisterEvent("GOSSIP_SHOW")
 GuildBankster:RegisterEvent("BANKFRAME_CLOSED")
 GuildBankster:RegisterEvent("VARIABLES_LOADED")
+GuildBankster:RegisterEvent("BAG_UPDATE")
 
 --------------------------------------------------
 -- GLOBAL PERSISTENT DATABASE INITIALIZATION    --
@@ -498,42 +499,85 @@ depositFrame:SetScript("OnUpdate", function()
 end)
 
 local gbank_queue = {}
-local gbankQueueFrame = CreateFrame("Frame")
-gbankQueueFrame.wait_on = 0
-gbankQueueFrame.actions = {
+-- local gbankQueueFrame = CreateFrame("Frame")
+GuildBankster.wait_on = 0
+GuildBankster.actions = {
   print = "print",
   deposit = "deposit",
   withdrawSome = "withdrawSome",
   withdrawAll = "withdrawAll",
 }
 
-gbankQueueFrame:RegisterEvent("BAG_UPDATE")
-gbankQueueFrame:SetScript("OnEvent", function ()
-  gbankQueueFrame:ProgressQueue()
-end)
+-- gbankQueueFrame:RegisterEvent("BAG_UPDATE")
+-- gbankQueueFrame:SetScript("OnEvent", function ()
+--   print("bag event")
+--   if gbankQueueFrame.wait_on > 1 then
+--     gbankQueueFrame.wait_on = gbankQueueFrame.wait_on - 1
+--     print("waiting")
+--   else
+--     GuildBankster:ProgressQueue()
+--   end
+-- end)
 
-function gbankQueueFrame:ProgressQueue()
-  if not gbank_queue[1] then return end
-  if gbankQueueFrame.wait_on > 0 then
-    gbankQueueFrame.wait_on = gbankQueueFrame.wait_on - 1
+function GuildBankster:BAG_UPDATE(which)
+  if self.wait_on > 1 then
+    self.wait_on = self.wait_on - 1
+    -- print("waiting")
+  else
+    self:ProgressQueue()
+  end
+end
+
+function GuildBankster:ProgressQueue()
+  if not gbank_queue[1] then
+    -- print("non")
     return
   end
 
-  local action = table.remove(depositQueue, 1)
-  if action.type == action.type == gbankQueueFrame.actions[print] then
-    gb_print(action.args[1])
+  -- print("try")
+
+  local action = table.remove(gbank_queue, 1)
+  if action.type == self.actions.print then
+    for _,line in action.args do
+      gb_print(line)
+    end
+    self:ProgressQueue()
   end
-  if action.type == gbankQueueFrame.actions[deposit] then
-    GuildBankster:Deposit(unpack(action.args))
-    gbankQueueFrame.wait_on = 1 -- 1 update
+  if action.type == self.actions.deposit then
+    -- print("deposit try")
+    self.wait_on = 1 -- 1 update
+    self:Deposit(unpack(action.args))
+    return
   end
-  if action.type == gbankQueueFrame.actions[withdrawSome] then
-    GuildBankster:Withdraw(unpack(action.args))
-    gbankQueueFrame.wait_on = 2 -- 2 update
+  if action.type == self.actions.withdrawSome then
+    -- print("withdraw some")
+    -- GuildBankster:Withdraw(unpack(action.args))
+    local bank_tab = action.args[1]
+    local bank_slot = action.args[2]
+    local difference = action.args[3]
+
+    -- partial removal requires use of specific bag slots
+    for bag = 0, NUM_BAG_SLOTS do
+      local numSlots = GetContainerNumSlots(bag)
+      for slot = 1, numSlots do
+        local itemLink = GetContainerItemLink(bag, slot)
+        if not itemLink then
+          self.wait_on = 2 -- 2 update
+          self:Withdraw(bank_tab, bank_slot, bag, slot, difference)
+          -- print("withdraw from "..bank_tab.." slot "..bank_slot.." "..difference)
+          return
+        end
+      end
+    end
+    -- todo, combine these two removals, you should really need empty space for either case
+    gb_print("Tried to remove extra " .. GetItemInfo("item:"..item) .. " but had no empty bag space.")
+    return
   end
-  if action.type == gbankQueueFrame.actions[withdrawAll] then
-    GuildBankster:Withdraw(unpack(action.args))
-    gbankQueueFrame.wait_on = 1 -- 1 update
+  if action.type == self.actions.withdrawAll then
+    -- print("withdraw all")
+    self.wait_on = 1 -- 1 update
+    self:Withdraw(unpack(action.args))
+    return
   end
 end
 
@@ -597,9 +641,7 @@ local function RestockBank()
   local inventoryState = BuildInventoryState()  -- snapshot of your inventory
   local missingItems = {}  -- table to record materials we couldn't fully restock
 
-  table.insert(depositQueue, function()
-    gb_print("Beginning Guildbank restock...")
-  end)
+  table.insert(gbank_queue, { type = GuildBankster.actions.print, args = { "Beginning Guildbank restock..." } })
   for tab = 1, 6 do
     if not ignoredTabs[tab] then
       local currentItems = ScanGuildBank(tab)
@@ -617,21 +659,7 @@ local function RestockBank()
                 local s = slot
                 local difference = -missing
                 local item = current.itemID
-                table.insert(depositQueue, function(ix)
-                  -- partial removal requires use of specific bag slots
-                  for bag = 0, NUM_BAG_SLOTS do
-                    local numSlots = GetContainerNumSlots(bag)
-                    for slot = 1, numSlots do
-                      local itemLink = GetContainerItemLink(bag, slot)
-                      if not itemLink then
-                        GuildBankster:Withdraw(t, s, bag, slot, difference)
-                        print("withdraw from "..t.." slot "..s.." "..difference)
-                        return
-                      end
-                    end
-                  end
-                  gb_print("Tried to remove extra " .. GetItemInfo("item:"..item) .. " but had no empty bag space.")
-                end)
+                table.insert(gbank_queue, { type = GuildBankster.actions.withdrawSome, args = { t, s, difference } })
                 missing = 0
               end
             elseif current.count > 0 then
@@ -639,10 +667,7 @@ local function RestockBank()
               local t = tab
               local s = slot
               local c = current.count
-              table.insert(depositQueue, function(ix)
-                GuildBankster:Withdraw(t, s, 0, 0, c)
-                print("withdrawall from "..t.." slot "..s.." "..c)
-              end)
+              table.insert(gbank_queue, { type = GuildBankster.actions.withdrawAll, args = { t, s, 0, 0, c } })
             end
           end
           if missing > 0 then
@@ -656,11 +681,7 @@ local function RestockBank()
                 local b = bag
                 local i = inv_slot
                 local m = depositCount
-                table.insert(depositQueue, function(ix)
-                  -- print(format("tab %i, slot %i, bag %i, inv_slot %i, depositing %i", t, s, b, i, m))
-                  -- gb_print(string.rep(".", math.min(ix,20)))
-                  GuildBankster:Deposit(t, s, b, i, m)
-                end)
+                table.insert(gbank_queue, { type = GuildBankster.actions.deposit, args = { t, s, b, i, m } })
                 missing = missing - depositCount
               else
                 -- No more inventory available for this item.
@@ -673,19 +694,16 @@ local function RestockBank()
       end
     end
   end
-  table.insert(depositQueue, function()
-    gb_print("Guildbank restock finished.")
-  end)
+  table.insert(gbank_queue, { type = GuildBankster.actions.print, args = { "Guildbank restock finished." } })
   if next(missingItems) then
-    table.insert(depositQueue, function()
-      gb_print("The following could not be restocked due to insufficient inventory:")
-      for itemID, count in pairs(missingItems) do
-        gb_print(string.format("%d : %s", count, GetItemInfo("item:"..itemID)))
-      end
-    end)
+    local lines = { "The following could not be restocked due to insufficient inventory:" }
+    for itemID, count in pairs(missingItems) do
+      table.insert(lines, string.format("%d : %s", count, GetItemInfo("item:"..itemID)))
+    end
+    table.insert(gbank_queue, { type = GuildBankster.actions.print, args = lines })
   end
+  GuildBankster:ProgressQueue()
 end
-
 
 --------------------------------------------------
 -- RESTOCK BUTTON: When pressed, trigger the RestockBank function.

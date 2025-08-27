@@ -1588,7 +1588,11 @@ function GuildBankster:RestockBankster_NextJob()
         if not maxStack then maxStack = 1 end
         
         -- Sort stacks by count (smallest first for consolidation)
-        table.sort(stacks, function(a, b) return a.count < b.count end)
+        table.sort(stacks, function(a, b) 
+          if not a then return false end
+          if not b then return true end
+          return a.count < b.count 
+        end)
         
         -- Find a pair of stacks that can be combined
         local target_stack, source_stack = nil, nil
@@ -1665,14 +1669,31 @@ function GuildBankster:RestockBankster_NextJob()
     if stacks and table.getn(stacks) > 0 then
       -- Sort stacks by how well they match our need
       table.sort(stacks, function(a, b)
+        -- Handle nil values
+        if not a then return false end
+        if not b then return true end
+        
+        local a_matches = (a.count == job.need)
+        local b_matches = (b.count == job.need)
+        
         -- Prefer exact matches
-        if a.count == job.need then return true end
-        if b.count == job.need then return false end
-        -- Then prefer smallest sufficient stack
-        if a.count >= job.need and b.count >= job.need then
+        if a_matches and not b_matches then return true end
+        if b_matches and not a_matches then return false end
+        
+        -- Both match or neither match - check if both are sufficient
+        local a_sufficient = a.count >= job.need
+        local b_sufficient = b.count >= job.need
+        
+        -- If both sufficient, prefer smaller
+        if a_sufficient and b_sufficient then
           return a.count < b.count
         end
-        -- Then prefer larger stacks
+        
+        -- If only one is sufficient, prefer that one
+        if a_sufficient and not b_sufficient then return true end
+        if b_sufficient and not a_sufficient then return false end
+        
+        -- Neither sufficient - prefer larger
         return a.count > b.count
       end)
       

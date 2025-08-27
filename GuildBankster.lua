@@ -28,6 +28,9 @@ local missing_totals = {} -- [itemID] = total_missing
 local last_action_time = 0
 local RESTOCK_TIMEOUT = 5 -- seconds before forcing next job if stuck
 local current_operation = {} -- Track current operation for debugging
+local pre_operation_state = {} -- Track inventory state before operation
+local operation_retry_count = 0
+local MAX_RETRIES = 3
 
 local function gb_print(msg)
   DEFAULT_CHAT_FRAME:AddMessage("|cff14a868GuildBankster:|r "..msg)
@@ -545,53 +548,54 @@ local function FindItemInInventory(itemID)
 end
 
 --------------------------------------------------
--- DEPOSIT QUEUE: Process one deposit every 0.2 sec.
+-- CONTINUATION SYSTEM: Event-driven processing
 --------------------------------------------------
-local depositQueue = {}
-local depositFrame = CreateFrame("Frame")
-depositFrame.lastTime = 0
-depositFrame:SetScript("OnUpdate", function()
-  this.lastTime = this.lastTime + arg1
+local continuation_frame = CreateFrame("Frame")
+local continuation_queue = {}
+local continuation_active = false
+local continuation_timeout_check = 0
+
+-- OnUpdate only for timeout checking
+continuation_frame:SetScript("OnUpdate", function()
+  continuation_timeout_check = continuation_timeout_check + arg1
   
-  -- Check for restock timeout
-  if GuildBankster.wait_on and GuildBankster.wait_on > 0 then
-    if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
-      -- Generate detailed diagnostic report
-      gb_print("|cffff0000=== TIMEOUT DETECTED ===|r")
-      gb_print("Operation: " .. (current_operation.type or "unknown"))
-      if current_operation.itemID then
-        local itemName = GetItemInfo("item:"..current_operation.itemID) or ("item:"..current_operation.itemID)
-        gb_print("Item: " .. itemName .. " (ID: " .. current_operation.itemID .. ")")
+  -- Check timeout every 0.1 seconds
+  if continuation_timeout_check >= 0.1 then
+    continuation_timeout_check = 0
+    
+    -- Check for restock timeout
+    if GuildBankster.wait_on and GuildBankster.wait_on > 0 then
+      if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
+        -- Generate detailed diagnostic report
+        
+        GuildBankster.wait_on = 0
+        last_action_time = 0
+        current_operation = {}
+        GuildBankster:RestockBankster_NextJob()
       end
-      if current_operation.amount then
-        gb_print("Amount: " .. current_operation.amount)
-      end
-      if current_operation.from then
-        gb_print("From: " .. current_operation.from)
-      end
-      if current_operation.to then
-        gb_print("To: " .. current_operation.to)
-      end
-      gb_print("Expected " .. GuildBankster.wait_on .. " more BAG_UPDATE events")
-      gb_print("Waited " .. string.format("%.1f", GetTime() - last_action_time) .. " seconds")
-      gb_print("Forcing next job...")
-      
-      GuildBankster.wait_on = 0
-      last_action_time = 0
-      current_operation = {}
-      GuildBankster:RestockBankster_NextJob()
-    end
-  end
-  
-  if this.lastTime >= 0.4 then
-    this.lastTime = 0
-    local size = table.getn(depositQueue)
-    if size > 0 then
-      local action = table.remove(depositQueue, 1)
-      action(size)  -- Execute the deposit command.
     end
   end
 end)
+
+-- Process continuation queue
+function GuildBankster:ProcessContinuation()
+  if continuation_active then return end
+  
+  local next_action = table.remove(continuation_queue, 1)
+  if next_action then
+    continuation_active = true
+    next_action()
+  end
+end
+
+-- Add action to continuation queue
+function GuildBankster:QueueContinuation(action)
+  table.insert(continuation_queue, action)
+  -- Try to start immediately if nothing is running
+  if not continuation_active then
+    self:ProcessContinuation()
+  end
+end
 
 local gbank_queue = {}
 -- local gbankQueueFrame = CreateFrame("Frame")
@@ -640,25 +644,15 @@ function GuildBankster:StartBagDiagnostic(operation)
   bag_update_diagnostic.count = 0
   bag_update_diagnostic.operation = operation
   bag_update_diagnostic.start_time = GetTime()
-  gb_print("Starting diagnostic: " .. operation)
 end
 
 function GuildBankster:EndBagDiagnostic()
   if bag_update_diagnostic.active then
-    gb_print(string.format("Operation '%s' triggered %d BAG_UPDATE events", 
-      bag_update_diagnostic.operation, bag_update_diagnostic.count))
     bag_update_diagnostic.active = false
   end
 end
 
 function GuildBankster:TestBankToInventoryMoves()
-  gb_print("Testing bank-to-inventory move patterns...")
-  gb_print("Please manually test the following:")
-  gb_print("1. /run GuildBankster:TestMove('full_to_empty') - then move full stack to empty slot")
-  gb_print("2. /run GuildBankster:TestMove('partial_to_empty') - then move partial stack to empty slot")
-  gb_print("3. /run GuildBankster:TestMove('partial_to_partial') - then move partial onto partial")
-  gb_print("4. /run GuildBankster:TestMove('partial_to_full') - then move partial onto full")
-  gb_print("5. /run GuildBankster:TestMove('split_to_empty') - then split stack to empty")
 end
 
 function GuildBankster:TestMove(moveType)
@@ -666,6 +660,73 @@ function GuildBankster:TestMove(moveType)
   -- User performs the move manually
   -- Diagnostic will track BAG_UPDATE events
   -- After 5 seconds or manual call to EndBagDiagnostic, results are printed
+end
+
+-- Verify that expected inventory changes occurred
+local function VerifyInventoryChange(operation, pre_state)
+  if operation.type == "deposit" then
+    -- Check if source slot lost the expected amount
+    local currentLink = GetContainerItemLink(operation.source_bag, operation.source_slot)
+    local currentCount = 0
+    if currentLink then
+      local _, count = GetContainerItemInfo(operation.source_bag, operation.source_slot)
+      currentCount = count or 0
+    end
+    
+    local expectedChange = operation.amount
+    local actualChange = pre_state.source_count - currentCount
+    
+    -- gb_print("Verify deposit: expected -" .. expectedChange .. ", actual -" .. actualChange)
+    return actualChange >= expectedChange
+    
+  elseif operation.type == "bank_to_bag_split" then
+    -- Check if destination bag received items
+    local currentLink = GetContainerItemLink(operation.dest_bag, operation.dest_slot)
+    local currentCount = 0
+    if currentLink then
+      local _, count = GetContainerItemInfo(operation.dest_bag, operation.dest_slot)
+      currentCount = count or 0
+    end
+    
+    local expectedGain = operation.amount
+    local actualGain = currentCount - pre_state.dest_count
+    
+    return actualGain >= expectedGain
+    
+  elseif operation.type == "stack_combination" then
+    -- Check if source slot is empty and destination has more items
+    local sourceLink = GetContainerItemLink(operation.source_bag, operation.source_slot)
+    local sourceCount = 0
+    if sourceLink then
+      local _, count = GetContainerItemInfo(operation.source_bag, operation.source_slot)
+      sourceCount = count or 0
+    end
+    
+    local destLink = GetContainerItemLink(operation.dest_bag, operation.dest_slot)
+    local destCount = 0
+    if destLink then
+      local _, count = GetContainerItemInfo(operation.dest_bag, operation.dest_slot)
+      destCount = count or 0
+    end
+    
+    -- Success means source is empty (or reduced) and dest has gained
+    local sourceReduction = pre_state.source_count - sourceCount
+    local destIncrease = destCount - pre_state.dest_count
+    
+    -- gb_print("Verify stack combination: source lost " .. sourceReduction .. ", dest gained " .. destIncrease)
+    return sourceReduction > 0 and destIncrease > 0
+  end
+  
+  return true -- Default to success for unknown operations
+end
+
+function GuildBankster:ResetRestock()
+  self.wait_on = 0
+  continuation_active = false
+  last_action_time = 0
+  current_operation = {}
+  for i = 1, table.getn(restock_jobs) do restock_jobs[i] = nil end
+  for i = 1, table.getn(continuation_queue) do continuation_queue[i] = nil end
 end
 
 function GuildBankster:BAG_UPDATE(which)
@@ -678,17 +739,49 @@ function GuildBankster:BAG_UPDATE(which)
     end
   end
   
-  if self.wait_on and self.wait_on > 0 then
-    self.wait_on = self.wait_on - 1
-    if self.wait_on == 0 then
-      current_operation = {}  -- Clear operation on success
-      self:RestockBankster_NextJob()
-    else
-      -- Check for timeout - force continue if we've been waiting too long
-      if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
-        gb_print("Timeout detected, forcing next job...")
-        self.wait_on = 0
+  -- Continuation-based processing - check if operation completed successfully
+  if continuation_active and current_operation.type and pre_operation_state then
+    local success = VerifyInventoryChange(current_operation, pre_operation_state)
+    
+    if success then
+      -- gb_print("Operation verified successfully")
+      
+      -- Clear operation state
+      current_operation = {}
+      pre_operation_state = {}
+      operation_retry_count = 0
+      continuation_active = false
+      last_action_time = 0
+      
+      -- Process next restock job or continuation
+      if next(restock_jobs) then
         self:RestockBankster_NextJob()
+      else
+        self:ProcessContinuation()
+      end
+    else
+      -- Operation not complete yet, but check for timeout  
+      if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
+        operation_retry_count = operation_retry_count + 1
+        
+        if operation_retry_count < MAX_RETRIES then
+          -- Reset timeout and try again (the operation might still complete)
+          last_action_time = GetTime()
+        else
+          
+          -- Clear operation state and continue
+          current_operation = {}
+          pre_operation_state = {}
+          operation_retry_count = 0
+          continuation_active = false
+          last_action_time = 0
+          
+          if next(restock_jobs) then
+            self:RestockBankster_NextJob()
+          else
+            self:ProcessContinuation()
+          end
+        end
       end
     end
   end
@@ -738,7 +831,6 @@ function GuildBankster:ProgressQueue()
       end
     end
     -- todo, combine these two removals, you should really need empty space for either case
-    gb_print("Tried to remove extra " .. GetItemInfo("item:"..item) .. " but had no empty bag space.")
     return
   end
   if action.type == self.actions.withdrawAll then
@@ -755,51 +847,6 @@ function GuildBankster:ProgressQueue()
     PickupContainerItem(targetBag, targetSlot)
   end
 end
-
-
-depositFrame.lastTime = 0
-depositFrame:SetScript("OnUpdate", function()
-  this.lastTime = this.lastTime + arg1
-  
-  -- Check for restock timeout
-  if GuildBankster.wait_on and GuildBankster.wait_on > 0 then
-    if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
-      -- Generate detailed diagnostic report
-      gb_print("|cffff0000=== TIMEOUT DETECTED ===|r")
-      gb_print("Operation: " .. (current_operation.type or "unknown"))
-      if current_operation.itemID then
-        local itemName = GetItemInfo("item:"..current_operation.itemID) or ("item:"..current_operation.itemID)
-        gb_print("Item: " .. itemName .. " (ID: " .. current_operation.itemID .. ")")
-      end
-      if current_operation.amount then
-        gb_print("Amount: " .. current_operation.amount)
-      end
-      if current_operation.from then
-        gb_print("From: " .. current_operation.from)
-      end
-      if current_operation.to then
-        gb_print("To: " .. current_operation.to)
-      end
-      gb_print("Expected " .. GuildBankster.wait_on .. " more BAG_UPDATE events")
-      gb_print("Waited " .. string.format("%.1f", GetTime() - last_action_time) .. " seconds")
-      gb_print("Forcing next job...")
-      
-      GuildBankster.wait_on = 0
-      last_action_time = 0
-      current_operation = {}
-      GuildBankster:RestockBankster_NextJob()
-    end
-  end
-  
-  if this.lastTime >= 0.4 then
-    this.lastTime = 0
-    local size = table.getn(depositQueue)
-    if size > 0 then
-      local action = table.remove(depositQueue, 1)
-      action(size)  -- Execute the deposit command.
-    end
-  end
-end)
 
 --------------------------------------------------
 -- HELPER FUNCTIONS FOR INVENTORY SIMULATION
@@ -960,20 +1007,176 @@ local function RestockBankFromAllSources()
   GuildBankster:ProgressQueue()
 end
 
-local function FindInBag(itemID, amount)
+-- Rescan bags for current inventory state
+local function RescanBags()
+  local inventory = {}
   for bag = 0, NUM_BAG_SLOTS do
     for slot = 1, GetContainerNumSlots(bag) do
       local itemLink = GetContainerItemLink(bag, slot)
-      if itemLink and tonumber(getIDFromLink(itemLink)) == itemID then
-        local _, count = GetContainerItemInfo(bag, slot)
-        count = count > 0 and count or 1
-        if count > 0 then
-          return bag, slot, math.min(count, amount)
+      if itemLink then
+        local itemID = tonumber(getIDFromLink(itemLink))
+        local texture, itemCount = GetContainerItemInfo(bag, slot)
+        if itemID and itemCount then
+          if not inventory[itemID] then
+            inventory[itemID] = {}
+          end
+          table.insert(inventory[itemID], {
+            bag = bag,
+            slot = slot,
+            count = itemCount,
+            link = itemLink
+          })
         end
       end
     end
   end
+  return inventory
+end
+
+-- Capture inventory state for verification
+local function CaptureInventoryState(operation)
+  local state = {}
+  if operation.type == "deposit" then
+    -- Check source bag slot
+    local itemLink = GetContainerItemLink(operation.source_bag, operation.source_slot)
+    if itemLink then
+      local _, itemCount = GetContainerItemInfo(operation.source_bag, operation.source_slot)
+      state.source_count = itemCount or 0
+    else
+      state.source_count = 0
+    end
+  elseif operation.type == "bank_to_bag_split" then
+    -- Check both source bank slot and destination bag slot
+    local bankLink = GetContainerItemLink(operation.source_bag, operation.source_slot)
+    if bankLink then
+      local _, bankCount = GetContainerItemInfo(operation.source_bag, operation.source_slot)
+      state.source_count = bankCount or 0
+    else
+      state.source_count = 0
+    end
+    
+    local bagLink = GetContainerItemLink(operation.dest_bag, operation.dest_slot)
+    if bagLink then
+      local _, bagCount = GetContainerItemInfo(operation.dest_bag, operation.dest_slot)
+      state.dest_count = bagCount or 0
+    else
+      state.dest_count = 0
+    end
+  elseif operation.type == "stack_combination" then
+    -- Check both source and destination slots
+    local sourceLink = GetContainerItemLink(operation.source_bag, operation.source_slot)
+    if sourceLink then
+      local _, sourceCount = GetContainerItemInfo(operation.source_bag, operation.source_slot)
+      state.source_count = sourceCount or 0
+    else
+      state.source_count = 0
+    end
+    
+    local destLink = GetContainerItemLink(operation.dest_bag, operation.dest_slot)
+    if destLink then
+      local _, destCount = GetContainerItemInfo(operation.dest_bag, operation.dest_slot)
+      state.dest_count = destCount or 0
+    else
+      state.dest_count = 0
+    end
+  end
+  return state
+end
+
+local function FindInBag(itemID, amount)
+  local inventory = RescanBags()
+  if inventory[itemID] then
+    -- Find the largest stack first
+    local best_stack = nil
+    for i, stack in ipairs(inventory[itemID]) do
+      if not best_stack or stack.count > best_stack.count then
+        best_stack = stack
+      end
+    end
+    
+    if best_stack then
+      local take_amount = math.min(amount, best_stack.count)
+      return best_stack.bag, best_stack.slot, take_amount
+    end
+  end
   return nil, nil, 0
+end
+
+-- Calculate total available items in bags and bank
+local function CalculateAvailableItems(itemID)
+  local bag_total = 0
+  local bank_total = 0
+  local bank_stacks = {}
+  
+  -- Check bags
+  local inventory = RescanBags()
+  if inventory[itemID] then
+    for i, stack in ipairs(inventory[itemID]) do
+      bag_total = bag_total + stack.count
+    end
+  end
+  
+  -- Check bank
+  for i = 1, table.getn(bank_bag_ids) do
+    local bag = bank_bag_ids[i]
+    if bag then
+      for slot = 1, GetContainerNumSlots(bag) do
+        local itemLink = GetContainerItemLink(bag, slot)
+        if itemLink and tonumber(getIDFromLink(itemLink)) == itemID then
+          local _, count = GetContainerItemInfo(bag, slot)
+          count = count > 0 and count or 1
+          bank_total = bank_total + count
+          table.insert(bank_stacks, {bag = bag, slot = slot, count = count})
+        end
+      end
+    end
+  end
+  
+  -- Sort bank stacks by count (ascending - prefer taking from partial stacks first)
+  table.sort(bank_stacks, function(a, b) return a.count < b.count end)
+  
+  return bag_total, bank_total, bank_stacks
+end
+
+-- Plan the most efficient way to fill a guild bank slot
+local function PlanEfficientFill(itemID, needed_amount)
+  local bag_total, bank_total, bank_stacks = CalculateAvailableItems(itemID)
+  local total_available = bag_total + bank_total
+  
+  if total_available < needed_amount then
+    return nil -- Not enough items
+  end
+  
+  -- If we have enough in bags already, just deposit directly
+  if bag_total >= needed_amount then
+    return {type = "direct_deposit", amount = needed_amount}
+  end
+  
+  -- We need to consolidate from bank + bags
+  local need_from_bank = needed_amount - bag_total
+  local consolidation_plan = {}
+  local remaining_needed = need_from_bank
+  
+  -- Take from partial bank stacks first, then full stacks
+  for i, stack in ipairs(bank_stacks) do
+    if remaining_needed <= 0 then break end
+    
+    local take_amount = math.min(remaining_needed, stack.count)
+    table.insert(consolidation_plan, {
+      type = "withdraw_to_consolidate",
+      bag = stack.bag,
+      slot = stack.slot,
+      amount = take_amount
+    })
+    remaining_needed = remaining_needed - take_amount
+  end
+  
+  return {
+    type = "consolidate_then_deposit",
+    needed = needed_amount,
+    bag_has = bag_total,
+    bank_withdrawals = consolidation_plan
+  }
 end
 
 local function FindInBank(itemID, amount)
@@ -1050,20 +1253,54 @@ function GuildBankster:RestockBankStepwise()
           local have = current[slot]
           if have and have.itemID == itemID then
             if have.count < want_count then
-              restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count-have.count }
-              job_i = job_i + 1
+              local needed = want_count - have.count
+              local fill_plan = PlanEfficientFill(itemID, needed)
+              
+              if fill_plan and fill_plan.type == "consolidate_then_deposit" then
+                -- Add consolidation job
+                restock_jobs[job_i] = { 
+                  tab=tab, slot=slot, itemID=itemID, 
+                  type="consolidation",
+                  plan=fill_plan 
+                }
+                job_i = job_i + 1
+              else
+                -- Direct deposit or not enough items
+                restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=needed }
+                job_i = job_i + 1
+              end
             end
           elseif have and have.count > 0 then
             -- Remove wrong item first
             restock_jobs[job_i] = { tab=tab, slot=slot, itemID=have.itemID, need=-have.count, isRemoval=true }
             job_i = job_i + 1
-            -- Queue deposit after removal
-            restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count }
-            job_i = job_i + 1
+            -- Queue efficient fill after removal
+            local fill_plan = PlanEfficientFill(itemID, want_count)
+            if fill_plan and fill_plan.type == "consolidate_then_deposit" then
+              restock_jobs[job_i] = { 
+                tab=tab, slot=slot, itemID=itemID, 
+                type="consolidation",
+                plan=fill_plan 
+              }
+              job_i = job_i + 1
+            else
+              restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count }
+              job_i = job_i + 1
+            end
           else
             -- Empty slot, need full amount
-            restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count }
-            job_i = job_i + 1
+            local fill_plan = PlanEfficientFill(itemID, want_count)
+            if fill_plan and fill_plan.type == "consolidate_then_deposit" then
+              restock_jobs[job_i] = { 
+                tab=tab, slot=slot, itemID=itemID, 
+                type="consolidation",
+                plan=fill_plan 
+              }
+              job_i = job_i + 1
+            else
+              restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count }
+              job_i = job_i + 1
+            end
           end
         end
       end
@@ -1090,32 +1327,402 @@ function GuildBankster:RestockBankster_NextJob()
     end
     -- clear for next run
     for k in pairs(missing_totals) do missing_totals[k] = nil end
+    continuation_active = false  -- Clear continuation state when done
     return
   end
 
-  if job.need > 0 then
-    -- Try to find in bags
-    local bag, slot, to_deposit = FindInBag(job.itemID, job.need)
+  -- Handle consolidation jobs
+  if job.type == "consolidation" then
+    local plan = job.plan
+    
+    if not job.consolidation_phase then
+      -- Rescan bank to get fresh data for withdrawals
+      local bag_total, bank_total, bank_stacks = CalculateAvailableItems(job.itemID)
+      local need_from_bank = plan.needed - bag_total
+      
+      -- Rebuild withdrawal plan with fresh bank data
+      plan.bank_withdrawals = {}
+      local remaining_needed = need_from_bank
+      for i, stack in ipairs(bank_stacks) do
+        if remaining_needed <= 0 then break end
+        local take_amount = math.min(remaining_needed, stack.count)
+        table.insert(plan.bank_withdrawals, {
+          bag = stack.bag,
+          slot = stack.slot,
+          amount = take_amount
+        })
+        remaining_needed = remaining_needed - take_amount
+      end
+      
+      
+      -- If no valid withdrawals found, skip directly to depositing what's in bags
+      if table.getn(plan.bank_withdrawals) == 0 then
+        job.consolidation_phase = "depositing"
+      else
+        job.consolidation_phase = "withdrawing"
+        job.withdrawal_index = 1
+      end
+    end
+    
+    if job.consolidation_phase == "withdrawing" then
+      -- Check if we have any withdrawals to process
+      if table.getn(plan.bank_withdrawals) == 0 then
+        job.consolidation_phase = "depositing"
+        self:RestockBankster_NextJob()
+        return
+      end
+      
+      local withdrawal = plan.bank_withdrawals[job.withdrawal_index]
+      if withdrawal then
+        -- Track operation for debugging and verification
+        current_operation = {
+          type = "withdraw",
+          itemID = job.itemID,
+          amount = withdrawal.amount,
+          source_bag = withdrawal.bag,
+          source_slot = withdrawal.slot,
+          from = "bank bag " .. withdrawal.bag .. " slot " .. withdrawal.slot,
+          to = "inventory"
+        }
+        
+        -- Capture pre-operation state for verification
+        pre_operation_state = CaptureInventoryState(current_operation)
+        operation_retry_count = 0
+        
+        
+        last_action_time = GetTime()
+        continuation_active = true
+        
+        -- Find empty bag slot for the withdrawn items
+        local emptyBag, emptySlot = FindEmptyBagSlot()
+        if emptyBag then
+          -- Validate source slot has the expected item
+          local sourceLink = GetContainerItemLink(withdrawal.bag, withdrawal.slot)
+          local sourceItemID = sourceLink and tonumber(getIDFromLink(sourceLink))
+          local _, sourceCount = GetContainerItemInfo(withdrawal.bag, withdrawal.slot)
+          
+          
+          -- Check if source slot is invalid
+          if not sourceItemID or sourceItemID ~= job.itemID or not sourceCount or sourceCount < withdrawal.amount then
+            -- Skip this withdrawal and try the next one
+            job.withdrawal_index = job.withdrawal_index + 1
+            if job.withdrawal_index > table.getn(plan.bank_withdrawals) then
+              job.consolidation_phase = "depositing"
+            end
+            continuation_active = false
+            self:RestockBankster_NextJob()
+            return
+          end
+          
+          -- Validate destination is truly empty
+          local destLink = GetContainerItemLink(emptyBag, emptySlot)
+          
+          current_operation.dest_bag = emptyBag
+          current_operation.dest_slot = emptySlot
+          
+          -- Update operation tracking for bank-to-bag move
+          current_operation.type = "bank_to_bag_split"
+          pre_operation_state = CaptureInventoryState(current_operation)
+          
+          SplitContainerItem(withdrawal.bag, withdrawal.slot, withdrawal.amount)
+          PickupContainerItem(emptyBag, emptySlot)
+        else
+          -- Skip this withdrawal and try the next one
+          job.withdrawal_index = job.withdrawal_index + 1
+          if job.withdrawal_index > table.getn(plan.bank_withdrawals) then
+            job.consolidation_phase = "depositing"
+          end
+          continuation_active = false
+          self:RestockBankster_NextJob()
+          return
+        end
+        
+        job.withdrawal_index = job.withdrawal_index + 1
+        if job.withdrawal_index > table.getn(plan.bank_withdrawals) then
+          job.consolidation_phase = "stacking"
+        end
+        return
+      end
+    end
+    
+    if job.consolidation_phase == "stacking" then
+      -- Find all stacks of this item in bags and combine them
+      local inventory = RescanBags()
+      if inventory[job.itemID] and table.getn(inventory[job.itemID]) > 1 then
+        -- Sort stacks by count (largest first to be the target)
+        table.sort(inventory[job.itemID], function(a, b) return a.count > b.count end)
+        
+        local target_stack = inventory[job.itemID][1]  -- Largest stack
+        local source_stack = inventory[job.itemID][2]  -- Next stack to combine
+        
+        
+        if target_stack and source_stack then
+          -- Track operation for debugging and verification
+          current_operation = {
+            type = "stack_combination",
+            itemID = job.itemID,
+            amount = source_stack.count,
+            source_bag = source_stack.bag,
+            source_slot = source_stack.slot,
+            dest_bag = target_stack.bag,
+            dest_slot = target_stack.slot,
+            from = "bag " .. source_stack.bag .. " slot " .. source_stack.slot,
+            to = "bag " .. target_stack.bag .. " slot " .. target_stack.slot
+          }
+          
+          -- Capture pre-operation state for verification
+          pre_operation_state = CaptureInventoryState(current_operation)
+          operation_retry_count = 0
+          
+          
+          last_action_time = GetTime()
+          continuation_active = true
+          
+          -- Pick up source stack and put it on target stack
+          PickupContainerItem(source_stack.bag, source_stack.slot)
+          PickupContainerItem(target_stack.bag, target_stack.slot)
+          return
+        end
+      end
+      
+      -- No more stacking needed, move to depositing
+      job.consolidation_phase = "depositing"
+      -- Fall through to depositing phase
+    end
+    
+    if job.consolidation_phase == "depositing" then
+      -- Before depositing, ensure all items are consolidated into the largest stack possible
+      local inventory = RescanBags()
+      local stacks = inventory[job.itemID]
+      if stacks and table.getn(stacks) > 1 then
+        job.consolidation_phase = "stacking"
+        self:RestockBankster_NextJob()
+        return
+      end
+      
+      -- All items should now be in one stack - find the largest available amount
+      local inventory = RescanBags()
+      local stacks = inventory[job.itemID]
+      local bag, slot, to_deposit = nil, nil, 0
+      
+      if stacks and table.getn(stacks) > 0 then
+        -- Sort to get the largest stack first
+        table.sort(stacks, function(a, b) return a.count > b.count end)
+        local largest_stack = stacks[1]
+        bag, slot, to_deposit = largest_stack.bag, largest_stack.slot, largest_stack.count
+      end
+      
+      if bag and to_deposit > 0 then
+        -- Deposit the full amount available (all items are now consolidated)
+        local actual_amount = to_deposit
+        -- Track operation for debugging and verification
+        current_operation = {
+          type = "deposit",
+          itemID = job.itemID,
+          amount = actual_amount,
+          source_bag = bag,
+          source_slot = slot,
+          from = "bag " .. bag .. " slot " .. slot,
+          to = "guild bank tab " .. job.tab .. " slot " .. job.slot
+        }
+        
+        -- Capture pre-operation state for verification
+        pre_operation_state = CaptureInventoryState(current_operation)
+        operation_retry_count = 0
+        
+        
+        -- Switch to correct tab if needed
+        if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
+          GuildBankFrameTab_OnClick(job.tab)
+        end
+        
+        last_action_time = GetTime()
+        continuation_active = true
+        self:Deposit(job.tab, job.slot, bag, slot, actual_amount)
+        
+        -- Consolidation job complete after depositing all available items
+        -- Remove this job when complete
+        for i = 1, table.getn(restock_jobs)-1 do
+          restock_jobs[i] = restock_jobs[i+1]
+        end
+        restock_jobs[table.getn(restock_jobs)] = nil
+        
+        -- After successful completion, continue to next job if available
+        if next(restock_jobs) then
+          -- Don't set continuation_active to false here - let BAG_UPDATE handle it
+        else
+          gb_print("All restock jobs complete!")
+          continuation_active = false
+        end
+        return
+      else
+        -- Remove failed job
+        for i = 1, table.getn(restock_jobs)-1 do
+          restock_jobs[i] = restock_jobs[i+1]
+        end
+        restock_jobs[table.getn(restock_jobs)] = nil
+        
+        -- Continue to next job if available
+        if next(restock_jobs) then
+          continuation_active = false
+          self:RestockBankster_NextJob()
+        else
+          gb_print("All restock jobs complete!")
+          continuation_active = false
+        end
+        return
+      end
+    end
+    
+    return
+  end
+
+  -- Only log non-consolidation jobs
+  if job.type ~= "consolidation" then
+    local itemName = GetItemInfo("item:"..job.itemID) or ("item:"..job.itemID)
+  end
+
+  if job.need and job.need > 0 then
+    -- First check if we have multiple stacks that should be consolidated
+    local inventory = RescanBags()
+    local stacks = inventory[job.itemID]
+    
+    -- If we're in the middle of stacking, continue
+    if job.stacking_for_deposit then
+      if stacks and table.getn(stacks) > 1 then
+        -- Get item info including max stack size
+        local _, _, _, _, _, _, maxStack = GetItemInfo(job.itemID)
+        if not maxStack then maxStack = 1 end
+        
+        -- Sort stacks by count (smallest first for consolidation)
+        table.sort(stacks, function(a, b) return a.count < b.count end)
+        
+        -- Find a pair of stacks that can be combined
+        local target_stack, source_stack = nil, nil
+        for i = 1, table.getn(stacks) do
+          for j = i + 1, table.getn(stacks) do
+            if stacks[i].count + stacks[j].count <= maxStack then
+              -- These two can be combined
+              source_stack = stacks[i]
+              target_stack = stacks[j]
+              break
+            end
+          end
+          if source_stack then break end
+        end
+        
+        if target_stack and source_stack then
+          -- Track operation for debugging and verification
+          current_operation = {
+            type = "stack_combination",
+            itemID = job.itemID,
+            amount = source_stack.count,
+            source_bag = source_stack.bag,
+            source_slot = source_stack.slot,
+            dest_bag = target_stack.bag,
+            dest_slot = target_stack.slot,
+            from = "bag " .. source_stack.bag .. " slot " .. source_stack.slot,
+            to = "bag " .. target_stack.bag .. " slot " .. target_stack.slot
+          }
+          
+          -- Capture pre-operation state for verification
+          pre_operation_state = CaptureInventoryState(current_operation)
+          operation_retry_count = 0
+          
+          last_action_time = GetTime()
+          continuation_active = true
+          
+          -- Pick up source stack and put it on target stack
+          PickupContainerItem(source_stack.bag, source_stack.slot)
+          PickupContainerItem(target_stack.bag, target_stack.slot)
+          return
+        end
+      end
+      -- Stacking complete, clear flag
+      job.stacking_for_deposit = nil
+    elseif stacks and table.getn(stacks) > 1 then
+      -- Check if any stacks can actually be combined
+      local _, _, _, _, _, _, maxStack = GetItemInfo(job.itemID)
+      if not maxStack then maxStack = 1 end
+      
+      local can_combine = false
+      for i = 1, table.getn(stacks) do
+        for j = i + 1, table.getn(stacks) do
+          if stacks[i].count + stacks[j].count <= maxStack then
+            can_combine = true
+            break
+          end
+        end
+        if can_combine then break end
+      end
+      
+      if can_combine then
+        -- Start stacking process
+        job.stacking_for_deposit = true
+        -- Will handle stacking on next cycle
+        self:RestockBankster_NextJob()
+        return
+      end
+    end
+    
+    -- Now find the best stack to deposit from
+    -- If we have multiple stacks but couldn't combine them (all full), 
+    -- prefer using a stack that exactly matches our need, or the smallest sufficient stack
+    local bag, slot, to_deposit
+    if stacks and table.getn(stacks) > 0 then
+      -- Sort stacks by how well they match our need
+      table.sort(stacks, function(a, b)
+        -- Prefer exact matches
+        if a.count == job.need then return true end
+        if b.count == job.need then return false end
+        -- Then prefer smallest sufficient stack
+        if a.count >= job.need and b.count >= job.need then
+          return a.count < b.count
+        end
+        -- Then prefer larger stacks
+        return a.count > b.count
+      end)
+      
+      local best_stack = stacks[1]
+      if best_stack then
+        bag = best_stack.bag
+        slot = best_stack.slot
+        to_deposit = math.min(best_stack.count, job.need)
+      end
+    else
+      -- Fallback to original FindInBag
+      bag, slot, to_deposit = FindInBag(job.itemID, job.need)
+    end
+    
     if bag then
       -- item found, switch to the tab we're working on if it's different from current
       if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
         GuildBankFrameTab_OnClick(job.tab)
       end
 
-      -- Track operation for debugging
+      -- Track operation for debugging and verification
       current_operation = {
         type = "deposit",
         itemID = job.itemID,
         amount = to_deposit,
+        source_bag = bag,
+        source_slot = slot,
         from = "bag " .. bag .. " slot " .. slot,
         to = "guild bank tab " .. job.tab .. " slot " .. job.slot
       }
       
+      -- Capture pre-operation state for verification
+      pre_operation_state = CaptureInventoryState(current_operation)
+      operation_retry_count = 0
+      
+      
       last_action_time = GetTime()
-      self.wait_on = 1
+      continuation_active = true  -- Mark as active
       self:Deposit(job.tab, job.slot, bag, slot, to_deposit)
       job.need = job.need - to_deposit
       if job.need <= 0 then
+        -- Clear any stacking flags
+        job.stacking_for_deposit = nil
         -- Remove job from front of array (shift)
         for i = 1, table.getn(restock_jobs)-1 do
           restock_jobs[i] = restock_jobs[i+1]
@@ -1130,22 +1737,30 @@ function GuildBankster:RestockBankster_NextJob()
     if bbag then
       local eb, es = FindEmptyBagSlot()
       if eb then
-        -- Track operation for debugging
+        -- Track operation for debugging and verification
         current_operation = {
           type = "bank_to_bag_split",
           itemID = job.itemID,
           amount = can_move,
+          source_bag = bbag,
+          source_slot = bslot,
+          dest_bag = eb,
+          dest_slot = es,
           from = "bank bag " .. bbag .. " slot " .. bslot,
           to = "inventory bag " .. eb .. " slot " .. es
         }
         
+        -- Capture pre-operation state for verification
+        pre_operation_state = CaptureInventoryState(current_operation)
+        operation_retry_count = 0
+        
+        
         last_action_time = GetTime()
-        self.wait_on = 2
+        continuation_active = true
         SplitContainerItem(bbag, bslot, can_move)
         PickupContainerItem(eb, es)
         return
       else
-        gb_print("No free bag space for item "..job.itemID)
         for i = 1, table.getn(restock_jobs)-1 do
           restock_jobs[i] = restock_jobs[i+1]
         end
@@ -1158,6 +1773,8 @@ function GuildBankster:RestockBankster_NextJob()
       restock_jobs[i] = restock_jobs[i+1]
     end
     restock_jobs[table.getn(restock_jobs)] = nil
+    -- Continue immediately for next job since no BAG_UPDATE expected
+    continuation_active = false
     self:RestockBankster_NextJob()
     return
 
@@ -1171,8 +1788,9 @@ function GuildBankster:RestockBankster_NextJob()
       to = "inventory"
     }
     
+    
     last_action_time = GetTime()
-    self.wait_on = 1
+    continuation_active = true  -- Mark as active
     self:Withdraw(job.tab, job.slot, 0, 0, math.abs(job.need))
     for i = 1, table.getn(restock_jobs)-1 do
       restock_jobs[i] = restock_jobs[i+1]

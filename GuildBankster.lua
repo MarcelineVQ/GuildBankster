@@ -22,6 +22,13 @@ local in_range_npc = {
   ["Forworn Mule"] = { name = "Forworn Mule", city = "any" },
 }
 
+-- Restock variables (defined early so OnUpdate can access them)
+local restock_jobs = {} -- Array of job tables; always shift after completion
+local missing_totals = {} -- [itemID] = total_missing
+local last_action_time = 0
+local RESTOCK_TIMEOUT = 5 -- seconds before forcing next job if stuck
+local current_operation = {} -- Track current operation for debugging
+
 local function gb_print(msg)
   DEFAULT_CHAT_FRAME:AddMessage("|cff14a868GuildBankster:|r "..msg)
 end
@@ -31,6 +38,24 @@ function getIDFromLink(link)
   return id
 end
 
+function SpoofGossip()
+  UIPanelWindows.GossipFrame.pushable = 99
+  local centerFrame = (GetCenterFrame())
+  HideUIPanel(centerFrame)
+  ShowUIPanel(centerFrame)
+  GuildBank.gossipOpen = true
+  GossipFrame:SetAlpha(0)
+  GossipFrame:EnableMouse(nil)
+  if not GuildBank.ready then
+    GuildBank:GetBankInfo()
+  else
+    GuildBankFrameTab_OnClick(1, true)
+    GuildBankFrameBottomTab_OnClick(1)
+    GuildBankFrame:Show()
+  end
+end
+
+GuildBank = findGuildBankFrame()
 GuildBankster = CreateFrame("Frame")
 
 function GuildBankster:Deposit(tab,gbank_slot,bag,inv_slot,count)
@@ -51,6 +76,45 @@ function GuildBankster:ApplyTemplate(template,tab,dry_run)
 end
 
 
+local MAX_TABS = 5
+local MAX_SLOTS = 98
+
+local orig_GuildBankFrame_OnShow = GuildBankFrame_OnShow
+function GBS_GuildBankFrame_OnShow(a,b,c,d,e,f)
+  orig_GuildBankFrame_OnShow(a,b,c,d,e,f)
+
+  if InventoryCounterDB then
+    local counts = {}
+    local count = 0
+    for i = 1, MAX_TABS do
+      for _, item in GuildBank.items[i] do
+        counts[item.itemID] = item.count + (counts[item.itemID] or 0)
+      end
+    end
+    for itemID,count in counts do
+      local name = GetItemInfo("item:"..itemID)
+      if name then
+        InventoryCounterDB[GuildBank.guildInfo.name] = InventoryCounterDB[GuildBank.guildInfo.name] or { gbank = { [name] = 0, } }
+        InventoryCounterDB[GuildBank.guildInfo.name]["gbank"][name] = count
+      end
+    end
+  end
+end
+GuildBankFrame_OnShow = GBS_GuildBankFrame_OnShow
+
+
+-- Find the frame object
+function findGuildBankFrame()
+  local f = EnumerateFrames()
+  while f do
+    if f.prefix and f.prefix == "TW_GUILDBANK" then
+      return f
+    end
+    f = EnumerateFrames(f)
+  end
+end
+
+
 local function ScanGuildBank(tab)
   local items = {}
   for i=1,98 do
@@ -65,7 +129,7 @@ function GuildBankster:BANKFRAME_OPENED()
   -- if banker.city == GetRealZoneText() then 
   GuildBankster.bank_open = true
   -- only do this if in interact distance?
-  GuildBank:SpoofGossip()
+  SpoofGossip()
 end
 
 function GuildBankster:BANKFRAME_CLOSED()
@@ -488,6 +552,37 @@ local depositFrame = CreateFrame("Frame")
 depositFrame.lastTime = 0
 depositFrame:SetScript("OnUpdate", function()
   this.lastTime = this.lastTime + arg1
+  
+  -- Check for restock timeout
+  if GuildBankster.wait_on and GuildBankster.wait_on > 0 then
+    if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
+      -- Generate detailed diagnostic report
+      gb_print("|cffff0000=== TIMEOUT DETECTED ===|r")
+      gb_print("Operation: " .. (current_operation.type or "unknown"))
+      if current_operation.itemID then
+        local itemName = GetItemInfo("item:"..current_operation.itemID) or ("item:"..current_operation.itemID)
+        gb_print("Item: " .. itemName .. " (ID: " .. current_operation.itemID .. ")")
+      end
+      if current_operation.amount then
+        gb_print("Amount: " .. current_operation.amount)
+      end
+      if current_operation.from then
+        gb_print("From: " .. current_operation.from)
+      end
+      if current_operation.to then
+        gb_print("To: " .. current_operation.to)
+      end
+      gb_print("Expected " .. GuildBankster.wait_on .. " more BAG_UPDATE events")
+      gb_print("Waited " .. string.format("%.1f", GetTime() - last_action_time) .. " seconds")
+      gb_print("Forcing next job...")
+      
+      GuildBankster.wait_on = 0
+      last_action_time = 0
+      current_operation = {}
+      GuildBankster:RestockBankster_NextJob()
+    end
+  end
+  
   if this.lastTime >= 0.4 then
     this.lastTime = 0
     local size = table.getn(depositQueue)
@@ -506,6 +601,7 @@ GuildBankster.actions = {
   deposit = "deposit",
   withdrawSome = "withdrawSome",
   withdrawAll = "withdrawAll",
+  moveItems = "moveItems",
 }
 
 -- gbankQueueFrame:RegisterEvent("BAG_UPDATE")
@@ -519,12 +615,82 @@ GuildBankster.actions = {
 --   end
 -- end)
 
+-- function GuildBankster:BAG_UPDATE(which)
+--   if self.wait_on > 1 then
+--     self.wait_on = self.wait_on - 1
+--     -- print("waiting")
+--   else
+--     self:ProgressQueue()
+--   end
+-- end
+
+--------------------------------------------------
+-- DIAGNOSTIC: Test BAG_UPDATE counts for different operations
+--------------------------------------------------
+local bag_update_diagnostic = {
+  active = false,
+  count = 0,
+  operation = "",
+  start_time = 0,
+  timeout = 3, -- seconds to wait before resetting
+}
+
+function GuildBankster:StartBagDiagnostic(operation)
+  bag_update_diagnostic.active = true
+  bag_update_diagnostic.count = 0
+  bag_update_diagnostic.operation = operation
+  bag_update_diagnostic.start_time = GetTime()
+  gb_print("Starting diagnostic: " .. operation)
+end
+
+function GuildBankster:EndBagDiagnostic()
+  if bag_update_diagnostic.active then
+    gb_print(string.format("Operation '%s' triggered %d BAG_UPDATE events", 
+      bag_update_diagnostic.operation, bag_update_diagnostic.count))
+    bag_update_diagnostic.active = false
+  end
+end
+
+function GuildBankster:TestBankToInventoryMoves()
+  gb_print("Testing bank-to-inventory move patterns...")
+  gb_print("Please manually test the following:")
+  gb_print("1. /run GuildBankster:TestMove('full_to_empty') - then move full stack to empty slot")
+  gb_print("2. /run GuildBankster:TestMove('partial_to_empty') - then move partial stack to empty slot")
+  gb_print("3. /run GuildBankster:TestMove('partial_to_partial') - then move partial onto partial")
+  gb_print("4. /run GuildBankster:TestMove('partial_to_full') - then move partial onto full")
+  gb_print("5. /run GuildBankster:TestMove('split_to_empty') - then split stack to empty")
+end
+
+function GuildBankster:TestMove(moveType)
+  self:StartBagDiagnostic(moveType)
+  -- User performs the move manually
+  -- Diagnostic will track BAG_UPDATE events
+  -- After 5 seconds or manual call to EndBagDiagnostic, results are printed
+end
+
 function GuildBankster:BAG_UPDATE(which)
-  if self.wait_on > 1 then
+  -- Track diagnostic events if active
+  if bag_update_diagnostic.active then
+    bag_update_diagnostic.count = bag_update_diagnostic.count + 1
+    -- Auto-end diagnostic after timeout
+    if GetTime() - bag_update_diagnostic.start_time > bag_update_diagnostic.timeout then
+      self:EndBagDiagnostic()
+    end
+  end
+  
+  if self.wait_on and self.wait_on > 0 then
     self.wait_on = self.wait_on - 1
-    -- print("waiting")
-  else
-    self:ProgressQueue()
+    if self.wait_on == 0 then
+      current_operation = {}  -- Clear operation on success
+      self:RestockBankster_NextJob()
+    else
+      -- Check for timeout - force continue if we've been waiting too long
+      if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
+        gb_print("Timeout detected, forcing next job...")
+        self.wait_on = 0
+        self:RestockBankster_NextJob()
+      end
+    end
   end
 end
 
@@ -534,9 +700,11 @@ function GuildBankster:ProgressQueue()
     return
   end
 
-  -- print("try")
-
   local action = table.remove(gbank_queue, 1)
+
+  print("try "..action.type)
+  print(self.wait_on)
+
   if action.type == self.actions.print then
     for _,line in action.args do
       gb_print(line)
@@ -579,12 +747,50 @@ function GuildBankster:ProgressQueue()
     self:Withdraw(unpack(action.args))
     return
   end
+  if action.type == self.actions.moveItems then
+    self.wait_on = 3 -- 3 updates
+    local bag,slot,targetBag,targetSlot,count = unpack(action.args)
+    
+    SplitContainerItem(bag, slot,count)
+    PickupContainerItem(targetBag, targetSlot)
+  end
 end
 
 
 depositFrame.lastTime = 0
 depositFrame:SetScript("OnUpdate", function()
   this.lastTime = this.lastTime + arg1
+  
+  -- Check for restock timeout
+  if GuildBankster.wait_on and GuildBankster.wait_on > 0 then
+    if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
+      -- Generate detailed diagnostic report
+      gb_print("|cffff0000=== TIMEOUT DETECTED ===|r")
+      gb_print("Operation: " .. (current_operation.type or "unknown"))
+      if current_operation.itemID then
+        local itemName = GetItemInfo("item:"..current_operation.itemID) or ("item:"..current_operation.itemID)
+        gb_print("Item: " .. itemName .. " (ID: " .. current_operation.itemID .. ")")
+      end
+      if current_operation.amount then
+        gb_print("Amount: " .. current_operation.amount)
+      end
+      if current_operation.from then
+        gb_print("From: " .. current_operation.from)
+      end
+      if current_operation.to then
+        gb_print("To: " .. current_operation.to)
+      end
+      gb_print("Expected " .. GuildBankster.wait_on .. " more BAG_UPDATE events")
+      gb_print("Waited " .. string.format("%.1f", GetTime() - last_action_time) .. " seconds")
+      gb_print("Forcing next job...")
+      
+      GuildBankster.wait_on = 0
+      last_action_time = 0
+      current_operation = {}
+      GuildBankster:RestockBankster_NextJob()
+    end
+  end
+  
   if this.lastTime >= 0.4 then
     this.lastTime = 0
     local size = table.getn(depositQueue)
@@ -613,25 +819,373 @@ local function BuildInventoryState()
   return state
 end
 
--- Searches the simulated inventory for the given itemID and "consumes" up to 'amount'
--- Returns bag, slot, and the number of items that can be deposited from that slot.
-local function FindAndConsume(inventory, itemID, amount)
-  for bag = 0, NUM_BAG_SLOTS do
-    local numSlots = GetContainerNumSlots(bag)
-    for slot = 1, numSlots do
+-- Helper: Build combined inventory state including player bank
+local bank_bag_ids = {-1, 5, 6, 7, 8, 9, 10}
+local ordered_bags = {0, 1, 2, 3, 4, -1, 5, 6, 7, 8, 9, 10}
+
+local function IsBankBag(bag)
+  for _, bankBag in ipairs(bank_bag_ids) do
+    if bag == bankBag then return true end
+  end
+  return false
+end
+
+local function BuildCombinedInventoryState()
+  local state = {}
+  for _, bag in ipairs(ordered_bags) do
+    state[bag] = {}
+    for slot = 1, GetContainerNumSlots(bag) do
       local itemLink = GetContainerItemLink(bag, slot)
       if itemLink then
-        local foundID = getIDFromLink(itemLink)
-        if tonumber(foundID) == tonumber(itemID) and inventory[bag][slot] > 0 then
-          local available = inventory[bag][slot]
-          local toUse = math.min(available, amount)
-          inventory[bag][slot] = available - toUse  -- "Consume" these items in our simulation.
+        local itemID = tonumber(getIDFromLink(itemLink))
+        local _, count = GetContainerItemInfo(bag, slot)
+        count = count > 0 and count or 1
+        state[bag][slot] = { itemID = itemID, count = count }
+      end
+    end
+  end
+  return state
+end
+
+-- Queue moves from player bank to inventory
+local function QueueMoveFromPlayerBankToInventory(itemID, amount, inventoryState)
+  local moved = 0
+  for _, bag in ipairs(bank_bag_ids) do
+    for slot = 1, GetContainerNumSlots(bag) do
+      local slotData = inventoryState[bag][slot]
+      if slotData and slotData.itemID == itemID and slotData.count > 0 then
+        local toMove = math.min(slotData.count, amount)
+        for targetBag = 0, NUM_BAG_SLOTS do
+          for targetSlot = 1, GetContainerNumSlots(targetBag) do
+            if not inventoryState[targetBag][targetSlot] then
+              table.insert(gbank_queue, {type = GuildBankster.actions.moveItems, args = {bag, slot, targetBag, targetSlot, toMove}})
+              slotData.count = slotData.count - toMove
+              if slotData.count <= 0 then
+                inventoryState[bag][slot] = nil
+              end
+              inventoryState[targetBag][targetSlot] = {itemID = itemID, count = toMove}
+              amount = amount - toMove
+              moved = moved + toMove
+              if amount <= 0 then return true, moved end
+              break
+            end
+          end
+          if amount <= 0 then break end
+        end
+      end
+      if amount <= 0 then break end
+    end
+    if amount <= 0 then break end
+  end
+  return moved > 0, moved
+end
+
+local function FindAndConsume(inventory, itemID, amount)
+  for _, bag in ipairs(ordered_bags) do
+    if inventory[bag] then
+      for slot, slotData in pairs(inventory[bag]) do
+        if slotData.itemID == itemID and slotData.count > 0 then
+          local toUse = math.min(slotData.count, amount)
+          slotData.count = slotData.count - toUse
+          if slotData.count <= 0 then
+            inventory[bag][slot] = nil
+          end
           return bag, slot, toUse
         end
       end
     end
   end
   return nil, nil, 0
+end
+
+-- Modified Restock function
+local function RestockBankFromAllSources()
+  local inventoryState = BuildCombinedInventoryState()
+  local missingItems = {}
+
+  table.insert(gbank_queue, { type = GuildBankster.actions.print, args = { "Beginning Guildbank restock from all sources..." } })
+
+  for tab = 1, 6 do
+    if not ignoredTabs[tab] then
+      local currentItems = ScanGuildBank(tab)
+      for slot = 1, 98 do
+        local desired = BankLayout[tab][slot]
+        if desired then
+          local current = currentItems[slot]
+          local missing = desired.count
+
+          if current then
+            if current.itemID == desired.itemID then
+              missing = desired.count - current.count
+              if missing < 0 then missing = 0 end
+            elseif current.count > 0 then
+              table.insert(gbank_queue, { type = GuildBankster.actions.withdrawAll, args = { tab, slot, 0, 0, current.count } })
+            end
+          end
+
+          while missing > 0 do
+            -- Try to find in non-bank bags FIRST
+            local bag, inv_slot, depositCount = FindAndConsume(inventoryState, desired.itemID, missing)
+            if bag and not IsBankBag(bag) then
+              table.insert(gbank_queue, { type = GuildBankster.actions.deposit, args = { tab, slot, bag, inv_slot, depositCount } })
+              missing = missing - depositCount
+            else
+              -- Now try to move from bank to inventory
+              local moved_any, moved_count = QueueMoveFromPlayerBankToInventory(desired.itemID, missing, inventoryState)
+              if moved_any then
+                -- Wait for move to complete, then loop again.
+                break
+              else
+                missingItems[desired.itemID] = (missingItems[desired.itemID] or 0) + missing
+                break
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  
+  if next(missingItems) then
+    local lines = { "The following could not be restocked due to insufficient combined inventory:" }
+    for itemID, count in pairs(missingItems) do
+      table.insert(lines, string.format("%d : %s", count, GetItemInfo("item:"..itemID)))
+    end
+    table.insert(gbank_queue, { type = GuildBankster.actions.print, args = lines })
+  else
+    table.insert(gbank_queue, { type = GuildBankster.actions.print, args = { "Guildbank restock finished." } })
+  end
+
+  GuildBankster:ProgressQueue()
+end
+
+local function FindInBag(itemID, amount)
+  for bag = 0, NUM_BAG_SLOTS do
+    for slot = 1, GetContainerNumSlots(bag) do
+      local itemLink = GetContainerItemLink(bag, slot)
+      if itemLink and tonumber(getIDFromLink(itemLink)) == itemID then
+        local _, count = GetContainerItemInfo(bag, slot)
+        count = count > 0 and count or 1
+        if count > 0 then
+          return bag, slot, math.min(count, amount)
+        end
+      end
+    end
+  end
+  return nil, nil, 0
+end
+
+local function FindInBank(itemID, amount)
+  for i = 1, table.getn(bank_bag_ids) do
+    local bag = bank_bag_ids[i]
+    for slot = 1, GetContainerNumSlots(bag) do
+      local itemLink = GetContainerItemLink(bag, slot)
+      if itemLink and tonumber(getIDFromLink(itemLink)) == itemID then
+        local _, count = GetContainerItemInfo(bag, slot)
+        count = count > 0 and count or 1
+        if count > 0 then
+          return bag, slot, math.min(count, amount)
+        end
+      end
+    end
+  end
+  return nil, nil, 0
+end
+
+local function FindStackInBank(itemID, needed)
+  local best_bag, best_slot, best_count
+  for i = 1, table.getn(bank_bag_ids) do
+    local bag = bank_bag_ids[i]
+    for slot = 1, GetContainerNumSlots(bag) do
+      local itemLink = GetContainerItemLink(bag, slot)
+      if itemLink and tonumber(getIDFromLink(itemLink)) == itemID then
+        local _, count = GetContainerItemInfo(bag, slot)
+        count = count > 0 and count or 1
+        if count == needed then
+          return bag, slot, count -- perfect match!
+        elseif count > needed then
+          -- Split off exactly what we need
+          return bag, slot, needed
+        elseif not best_count or count > best_count then
+          best_bag, best_slot, best_count = bag, slot, count -- track largest partial
+        end
+      end
+    end
+  end
+  if best_bag then
+    return best_bag, best_slot, best_count
+  end
+  return nil, nil, 0
+end
+
+local function FindEmptyBagSlot()
+  for bag = 0, NUM_BAG_SLOTS do
+    for slot = 1, GetContainerNumSlots(bag) do
+      if not GetContainerItemLink(bag, slot) then
+        return bag, slot
+      end
+    end
+  end
+  return nil, nil
+end
+
+-- (1) Build restock jobs (call this on button)
+function GuildBankster:RestockBankStepwise()
+  print("Beginning Guildbank restock...")
+  -- Clear previous jobs by nil'ing all values
+  for i = 1, table.getn(restock_jobs) do restock_jobs[i] = nil end
+  last_action_time = 0  -- Reset timeout tracking
+
+  local job_i = 1
+  for tab = 1, 6 do
+    if not ignoredTabs[tab] then
+      local desired_layout = BankLayout[tab]
+      local current = ScanGuildBank(tab)
+      for slot = 1, 98 do
+        local want = desired_layout[slot]
+        if want then
+          local want_count = want.count
+          local itemID = want.itemID
+          local have = current[slot]
+          if have and have.itemID == itemID then
+            if have.count < want_count then
+              restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count-have.count }
+              job_i = job_i + 1
+            end
+          elseif have and have.count > 0 then
+            -- Remove wrong item first
+            restock_jobs[job_i] = { tab=tab, slot=slot, itemID=have.itemID, need=-have.count, isRemoval=true }
+            job_i = job_i + 1
+            -- Queue deposit after removal
+            restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count }
+            job_i = job_i + 1
+          else
+            -- Empty slot, need full amount
+            restock_jobs[job_i] = { tab=tab, slot=slot, itemID=itemID, need=want_count }
+            job_i = job_i + 1
+          end
+        end
+      end
+    end
+  end
+
+  GuildBankster:RestockBankster_NextJob()
+end
+
+-- (2) Stepwise dispatcher
+function GuildBankster:RestockBankster_NextJob()
+  local job = restock_jobs[1]
+  if not job then
+    if next(missing_totals) then
+      local lines = { "The insufficient inventory to stock:" }
+      for itemID, count in pairs(missing_totals) do
+        table.insert(lines, string.format("%d : %s", count, GetItemInfo("item:"..itemID) or ("item:"..itemID)))
+      end
+      for i = 1, table.getn(lines) do
+        gb_print(lines[i])
+      end
+    else
+      gb_print("Guildbank restock finished.")
+    end
+    -- clear for next run
+    for k in pairs(missing_totals) do missing_totals[k] = nil end
+    return
+  end
+
+  if job.need > 0 then
+    -- Try to find in bags
+    local bag, slot, to_deposit = FindInBag(job.itemID, job.need)
+    if bag then
+      -- item found, switch to the tab we're working on if it's different from current
+      if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
+        GuildBankFrameTab_OnClick(job.tab)
+      end
+
+      -- Track operation for debugging
+      current_operation = {
+        type = "deposit",
+        itemID = job.itemID,
+        amount = to_deposit,
+        from = "bag " .. bag .. " slot " .. slot,
+        to = "guild bank tab " .. job.tab .. " slot " .. job.slot
+      }
+      
+      last_action_time = GetTime()
+      self.wait_on = 1
+      self:Deposit(job.tab, job.slot, bag, slot, to_deposit)
+      job.need = job.need - to_deposit
+      if job.need <= 0 then
+        -- Remove job from front of array (shift)
+        for i = 1, table.getn(restock_jobs)-1 do
+          restock_jobs[i] = restock_jobs[i+1]
+        end
+        restock_jobs[table.getn(restock_jobs)] = nil
+      end
+      return
+    end
+    -- Not in bags? Try to move from bank
+    -- local bbag, bslot, can_move = FindStackInBank(job.itemID, job.need)
+    local bbag, bslot, can_move = FindStackInBank(job.itemID, job.need)
+    if bbag then
+      local eb, es = FindEmptyBagSlot()
+      if eb then
+        -- Track operation for debugging
+        current_operation = {
+          type = "bank_to_bag_split",
+          itemID = job.itemID,
+          amount = can_move,
+          from = "bank bag " .. bbag .. " slot " .. bslot,
+          to = "inventory bag " .. eb .. " slot " .. es
+        }
+        
+        last_action_time = GetTime()
+        self.wait_on = 2
+        SplitContainerItem(bbag, bslot, can_move)
+        PickupContainerItem(eb, es)
+        return
+      else
+        gb_print("No free bag space for item "..job.itemID)
+        for i = 1, table.getn(restock_jobs)-1 do
+          restock_jobs[i] = restock_jobs[i+1]
+        end
+        restock_jobs[table.getn(restock_jobs)] = nil
+        return
+      end
+    end
+    missing_totals[job.itemID] = (missing_totals[job.itemID] or 0) + job.need
+    for i = 1, table.getn(restock_jobs)-1 do
+      restock_jobs[i] = restock_jobs[i+1]
+    end
+    restock_jobs[table.getn(restock_jobs)] = nil
+    self:RestockBankster_NextJob()
+    return
+
+  elseif (job.need < 0 or job.isRemoval) then
+    -- Track operation for debugging
+    current_operation = {
+      type = "withdraw",
+      itemID = job.itemID,
+      amount = math.abs(job.need),
+      from = "guild bank tab " .. job.tab .. " slot " .. job.slot,
+      to = "inventory"
+    }
+    
+    last_action_time = GetTime()
+    self.wait_on = 1
+    self:Withdraw(job.tab, job.slot, 0, 0, math.abs(job.need))
+    for i = 1, table.getn(restock_jobs)-1 do
+      restock_jobs[i] = restock_jobs[i+1]
+    end
+    restock_jobs[table.getn(restock_jobs)] = nil
+    return
+  else
+    for i = 1, table.getn(restock_jobs)-1 do
+      restock_jobs[i] = restock_jobs[i+1]
+    end
+    restock_jobs[table.getn(restock_jobs)] = nil
+    return
+  end
 end
 
 --------------------------------------------------
@@ -714,7 +1268,8 @@ restockButton:SetHeight(25)
 restockButton:SetText("Restock Bank")
 restockButton:SetPoint("BOTTOM", MockGuildBankFrame, "BOTTOM", 0, 40)
 restockButton:SetScript("OnClick", function()
-  RestockBank()
+  GuildBankster:RestockBankStepwise()
+  -- RestockBankFromAllSources()
 end)
 
 --------------------------------------------------
@@ -730,3 +1285,26 @@ hideButton:SetScript("OnClick", function()
     _G["MockGuildBankTabFrame"..i]:Hide()
   end
 end)
+
+-- stuff bank needs:
+-- -- essence of air
+-- -- bronze scarabs
+-- -- LBS
+-- essence of water
+
+-- todo, make lc sheet tally names on items
+-- todo, assing automation by placing peoples names and roles
+-- todo, skybox upscales
+-- tood, recheck health stone activation
+-- todo kel addon doesn't shut off
+-- todo, raid organizer needs work, including 20 man generic option
+-- todo, cthun organizer needs work and autoexport
+-- todo, automana should use tea if you don't have mana and just base it on hp
+-- todo did I HS at all on emps?
+-- todo make twthreat read version from .toc
+-- luna, make clickcasting things auto-lowercase
+-- todo, import roster from signup site to pull from for sheet
+-- todo, raid maker should have an auto-restore-groups button that will change a group but restore to the quick-saved raid after ecounter end.
+-- How though?
+-- make cthun marker MUCH better
+-- todo make a lib for managing external files and interacting/making streams --

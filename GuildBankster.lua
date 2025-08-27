@@ -753,12 +753,8 @@ function GuildBankster:BAG_UPDATE(which)
       continuation_active = false
       last_action_time = 0
       
-      -- Process next restock job or continuation
-      if next(restock_jobs) then
-        self:RestockBankster_NextJob()
-      else
-        self:ProcessContinuation()
-      end
+      -- Process next restock job or show completion
+      self:RestockBankster_NextJob()
     else
       -- Operation not complete yet, but check for timeout  
       if last_action_time > 0 and GetTime() - last_action_time > RESTOCK_TIMEOUT then
@@ -776,11 +772,8 @@ function GuildBankster:BAG_UPDATE(which)
           continuation_active = false
           last_action_time = 0
           
-          if next(restock_jobs) then
-            self:RestockBankster_NextJob()
-          else
-            self:ProcessContinuation()
-          end
+          -- Process next job or show completion
+          self:RestockBankster_NextJob()
         end
       end
     end
@@ -1728,6 +1721,7 @@ function GuildBankster:RestockBankster_NextJob()
           restock_jobs[i] = restock_jobs[i+1]
         end
         restock_jobs[table.getn(restock_jobs)] = nil
+        -- The BAG_UPDATE will handle continuation, but we need to ensure completion check happens
       end
       return
     end

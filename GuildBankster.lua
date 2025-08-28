@@ -229,7 +229,7 @@ end
 -- TEMPLATE INTEGRATION WITH GUILD BANK UI
 --------------------------------------------------
 local TemplateFrames = {}
-local CurrentTemplateTab = 1
+local CurrentTemplateTab = nil  -- Start as nil so we can detect first entry
 local TemplateMode = false
 
 
@@ -411,12 +411,37 @@ local function CreateTemplateFrame()
   return frame
 end
 
+-- Store original SetText function for the tab title
+local GuildBankFrameTabTitle_SetText_Original = nil
+
+-- Update template title with current tab and active/inactive status
+local function UpdateTemplateTitle(tabId)
+  if CurrentGuildSettings and GuildBankFrameTabTitle and GuildBankFrameTabTitle_SetText_Original then
+    local isActive = CurrentGuildSettings.templateActiveStates[tabId] or false
+    local statusText = isActive and "|cFF00FF00 (Active)|r" or "|cFFFF0000 (Inactive)|r"
+    GuildBankFrameTabTitle_SetText_Original(GuildBankFrameTabTitle, "Template " .. tabId .. statusText)
+  end
+end
+
 -- Handle Template tab click
 function GuildBankster_TemplateTab_OnClick()
   TemplateMode = true
   
-  -- Reset template tab to ensure clean state when entering template mode
-  -- CurrentTemplateTab = 1
+  -- Hook the tab title SetText to prevent updates during template mode
+  if GuildBankFrameTabTitle and not GuildBankFrameTabTitle_SetText_Original then
+    GuildBankFrameTabTitle_SetText_Original = GuildBankFrameTabTitle.SetText
+    GuildBankFrameTabTitle.SetText = function(self, text)
+      -- Only allow our template text to be set
+      if not TemplateMode then
+        GuildBankFrameTabTitle_SetText_Original(self, text)
+      end
+    end
+  end
+  
+  -- Set initial template tab to current guild bank tab if not set
+  if not CurrentTemplateTab then
+    CurrentTemplateTab = (GuildBank and GuildBank.currentTab) or 1
+  end
   
   -- Hide all other content frames (same as original bottom tab system)
   if GuildBankFrameSlots then GuildBankFrameSlots:Hide() end
@@ -430,6 +455,9 @@ function GuildBankster_TemplateTab_OnClick()
   if GuildBankFrameTemplateSlots then
     GuildBankFrameTemplateSlots:Show()
   end
+  
+  -- Update tab appearance for template mode
+  GuildBankster_UpdateTabsForTemplateMode()
   
   -- Enable guild bank tabs (same as tab 1) and register for right-click
   if GuildBank and GuildBank.tabs then
@@ -454,6 +482,69 @@ function GuildBankster_TemplateTab_OnClick()
   end
   if GuildBankFrameBottomTab_Enable then
     GuildBankFrameBottomTab_Enable(GuildBankFrameBottomTab4)
+  end
+  
+  -- NOW simulate a click on the current template tab to update title and display
+  -- Everything is fully set up so the click handler will work correctly
+  if _G["GuildBankFrameTab" .. CurrentTemplateTab] then
+    _G["GuildBankFrameTab" .. CurrentTemplateTab]:Click()
+  end
+end
+
+-- Update guild bank tab appearance and tooltips for template mode
+function GuildBankster_UpdateTabsForTemplateMode()
+  if not TemplateMode or not CurrentGuildSettings then return end
+  
+  -- Update each tab's appearance and tooltip
+  for i = 1, 6 do
+    local tab = _G["GuildBankFrameTab" .. i]
+    if tab then
+      local isActive = CurrentGuildSettings.templateActiveStates[i] or false
+      
+      -- Store original OnEnter script if not already stored
+      if not tab.originalOnEnter then
+        tab.originalOnEnter = tab:GetScript("OnEnter")
+      end
+      
+      -- Override OnEnter to show custom tooltip in template mode
+      tab:SetScript("OnEnter", function()
+        -- Get tab ID from the button itself
+        local tabId = this:GetID()
+        -- Get current active state dynamically
+        local currentlyActive = CurrentGuildSettings and CurrentGuildSettings.templateActiveStates[tabId] or false
+        GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+        GameTooltip:SetText((this.tooltip or "Template " .. tabId) .. " (Template " .. tabId .. ")", 1, 1, 1, 1)
+        GameTooltip:AddLine("Right-click to toggle template " .. (currentlyActive and "inactive" or "active"), 0.8, 0.8, 0.8, 1)
+        GameTooltip:Show()
+      end)
+      
+      -- Grey out inactive templates
+      if not isActive then
+        tab:GetNormalTexture():SetVertexColor(0.5, 0.5, 0.5, 1.0)
+        tab:GetPushedTexture():SetVertexColor(0.5, 0.5, 0.5, 1.0)
+      else
+        tab:GetNormalTexture():SetVertexColor(1.0, 1.0, 1.0, 1.0)
+        tab:GetPushedTexture():SetVertexColor(1.0, 1.0, 1.0, 1.0)
+      end
+    end
+  end
+end
+
+-- Restore guild bank tab appearance and tooltips when leaving template mode
+function GuildBankster_RestoreTabsFromTemplateMode()
+  for i = 1, 6 do
+    local tab = _G["GuildBankFrameTab" .. i]
+    if tab and tab.originalOnEnter then
+      -- Restore original OnEnter script
+      tab:SetScript("OnEnter", tab.originalOnEnter)
+      
+      -- Restore original colors
+      tab:GetNormalTexture():SetVertexColor(1.0, 1.0, 1.0, 1.0)
+      tab:GetPushedTexture():SetVertexColor(1.0, 1.0, 1.0, 1.0)
+      
+      -- Clear stored originals
+      tab.originalOnEnter = nil
+    end
   end
 end
 
@@ -542,11 +633,6 @@ function GuildBankster_UpdateTemplateDisplay()
     end
   end
   
-  -- Update tab title to show active/inactive state
-  if GuildBankFrameTabTitle then
-    local statusText = isActive and " (Active)" or " (Inactive)"
-    GuildBankFrameTabTitle:SetText("Template " .. CurrentTemplateTab .. statusText)
-  end
 end
 
 -- Track what template item is being "held"
@@ -726,6 +812,14 @@ local function GuildBankster_BottomTab_OnClick(id)
     if GuildBankFrameTemplateSlots then
       GuildBankFrameTemplateSlots:Hide()
     end
+    -- Restore tab appearance when leaving template mode
+    GuildBankster_RestoreTabsFromTemplateMode()
+    
+    -- Restore original tab title SetText function
+    if GuildBankFrameTabTitle and GuildBankFrameTabTitle_SetText_Original then
+      GuildBankFrameTabTitle.SetText = GuildBankFrameTabTitle_SetText_Original
+      GuildBankFrameTabTitle_SetText_Original = nil
+    end
     -- Call original function with proper context
     if GuildBankFrameBottomTab_OnClick_Original then
       local result = GuildBankFrameBottomTab_OnClick_Original(id)
@@ -755,6 +849,14 @@ local function GuildBankster_Tab_OnClick(id)
     CurrentGuildSettings.templateActiveStates[id] = not CurrentGuildSettings.templateActiveStates[id]
     local state = CurrentGuildSettings.templateActiveStates[id] and "active" or "inactive"
     gb_print("Template " .. id .. " is now " .. state)
+    
+    -- Update tab title if this is the current template
+    if id == CurrentTemplateTab then
+      UpdateTemplateTitle(id)
+    end
+    
+    -- Update tab appearance and tooltip
+    GuildBankster_UpdateTabsForTemplateMode()
     GuildBankster_UpdateTemplateDisplay()
     return
   end
@@ -775,6 +877,10 @@ local function GuildBankster_Tab_OnClick(id)
   end
 
   CurrentTemplateTab = id
+  
+  -- Update tab title
+  UpdateTemplateTitle(id)
+  
   GuildBankster_UpdateTemplateDisplay()
 end
 

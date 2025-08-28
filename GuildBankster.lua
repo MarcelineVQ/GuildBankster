@@ -153,26 +153,11 @@ function GuildBankster:GOSSIP_SHOW()
   end
 end
 
--- Initialize template data (called after VARIABLES_LOADED)
-local function InitializeTemplateData()
-  if not GuildBanksterDB then return end
-  
-  -- Initialize template storage if not exists
-  if not GuildBanksterDB.templates then
-    GuildBanksterDB.templates = {}
-  end
-
-  -- Initialize template active states if not exists
-  if not GuildBanksterDB.templateActiveStates then
-    GuildBanksterDB.templateActiveStates = {
-      [1] = false, [2] = false, [3] = false, [4] = false, [5] = false, [6] = false
-    }
-  end
-end
 
 function GuildBankster:VARIABLES_LOADED()
   GuildBanksterDB = GuildBanksterDB or {}
-  InitializeTemplateData()
+  -- Guild-specific initialization happens in GetGuildSettings() when needed
+  gb_print("GuildBankster addon loaded")
 end
 
 GuildBankster:RegisterEvent("BANKFRAME_OPENED")
@@ -189,69 +174,35 @@ end)
 --------------------------------------------------
 GuildBanksterDB = GuildBanksterDB or {}
 
-local function SaveGuildBanksterDB()
-  GuildBanksterDB.layout = BankLayout
-  GuildBanksterDB.ignoredTabs = ignoredTabs
-end
+-- Current guild settings (set when guild bank frame shows)
+local CurrentGuildSettings = nil
 
------------------------------------------
--- PLACEHOLDER FUNCTIONS FOR WOW 1.12  --
------------------------------------------
-
--- Global variable to store the current item on the cursor.
-local CursorItem = nil
-
--- Global variables for drag & drop within the mockup.
-local DraggedItem = nil
-local DraggedOrigin = nil
-
-local oldContainerFrameItemButton_OnClick = ContainerFrameItemButton_OnClick
-ContainerFrameItemButton_OnClick = function(button, ignoreModifiers,a4,a4,a5,a6,a7,a8,a9)
-  -- execute original onclick
-  local r = oldContainerFrameItemButton_OnClick(button, ignoreModifiers,a4,a4,a5,a6,a7,a8,a9)
-
-  if button == "LeftButton" then
-    local bag,slot = this:GetParent():GetID(), this:GetID()
-    if bag and slot then
-      local itemLink = GetContainerItemLink(bag, slot)
-      if itemLink then
-        -- GetContainerItemInfo returns multiple values; assume count is the second.
-        local texture, count, locked, quality = GetContainerItemInfo(bag, slot)
-        CursorItem = { itemLink = itemLink, count = count and (count > 0 and count or 1) or 0 }
-        return
-      end
-    end
-    -- else
-    CursorItem = nil
-      -- GuildBank:ResetAction()
+-- Initialize guild-specific settings when guild bank opens
+local function InitializeGuildSettings()
+  local guildName = "DEFAULT"
+  if GuildBank and GuildBank.guildInfo and GuildBank.guildInfo.name then
+    guildName = GuildBank.guildInfo.name
   end
-  return r
-end
-
--- Hook ClearCursor so that our stored CursorItem is cleared too.
-local OldClearCursor = ClearCursor
-function ClearCursor(a1,a2,a3)
-  CursorItem = nil
-  OldClearCursor(a1,a2,a3)
-end
-
-function GetCursorItemLink()
-    if CursorItem then
-        return CursorItem.itemLink
+  
+  if not GuildBanksterDB[guildName] then
+    GuildBanksterDB[guildName] = {
+      templates = {},
+      templateActiveStates = {}
+    }
+    -- Initialize default active states (all inactive by default)  
+    for i = 1, 6 do
+      GuildBanksterDB[guildName].templateActiveStates[i] = false
     end
-    return nil
+  end
+  
+  CurrentGuildSettings = GuildBanksterDB[guildName]
+  gb_print("Loaded settings for guild: " .. guildName)
 end
 
-function GetCursorItemCount()
-    if CursorItem then
-        return CursorItem.count
-    end
-    return 0
-end
 
--- function CursorHasItem()
-    -- return CursorItem ~= nil
--- end
+-----------------------------------------
+-- HELPER FUNCTIONS FOR WOW 1.12  --
+-----------------------------------------
 
 -- Extract the item ID from an itemLink.
 function getIDFromLink(link)
@@ -273,277 +224,6 @@ function GetItemIcon(itemLink)
     return nil
 end
 
---------------------------------------------------
--- MOCK GUILD BANK LAYOUT UI (USING math.mod etc) --
---------------------------------------------------
-
--- Global tables for layout and ignored tabs.
-BankLayout = {}    -- layout: BankLayout[tab][slot] = { itemLink, count, itemID }
-ignoredTabs = {}   -- ignoredTabs[tab] = true/false
-
-for tab = 1, 6 do
-  BankLayout[tab] = {}
-  for slot = 1, 98 do
-    BankLayout[tab][slot] = nil
-  end
-  ignoredTabs[tab] = false
-end
-
--- Create the main frame for the mock bank.
-local MockGuildBankFrame = CreateFrame("Frame", "MockGuildBankFrame", UIParent)
-MockGuildBankFrame:SetWidth(700)
-MockGuildBankFrame:SetHeight(400)
-MockGuildBankFrame:SetPoint("CENTER", UIParent)
--- MockGuildBankFrame:EnableMouse(true)
-MockGuildBankFrame:SetMovable(true)
-
--- Background for visibility.
-MockGuildBankFrame.bg = MockGuildBankFrame:CreateTexture(nil, "BACKGROUND")
-MockGuildBankFrame.bg:SetAllPoints(true)
--- MockGuildBankFrame.bg:SetVertexColor(0, 0, 0, 0.5)
-
--- Table to hold the frames for each tab.
-local tabFrames = {}
-
--- Create each bank tab frame (each with 98 slots, arranged in 7 rows of 14).
-for tab = 1, 6 do
-  local tabFrame = CreateFrame("Frame", "MockGuildBankTabFrame"..tab, MockGuildBankFrame)
-  tabFrame:SetWidth(680)
-  tabFrame:SetHeight(320)
-  tabFrame:SetPoint("TOP", MockGuildBankFrame, "TOP", 0, -40)
-  tabFrame.tabIndex = tab
-  tabFrame.slots = {}
-  if (tab ~= 1) then
-    tabFrame:Hide()  -- Only show the first tab initially.
-  end
-  
-  -- Create the 98 slot buttons.
-  for slot = 1, 98 do
-    local row = math.floor((slot - 1) / 14)
-    local col = math.mod(slot - 1, 14)
-    local btn = CreateFrame("Button", "MockGuildBankTab"..tab.."Slot"..slot, tabFrame, "ItemButtonTemplate")
-    btn:SetWidth(40)
-    btn:SetHeight(40)
-    btn:SetPoint("TOPLEFT", tabFrame, "TOPLEFT", 5 + col * 38, -5 - row * 38)
-    btn.slotIndex = slot
-    btn.tabIndex = tab
-
-    -- Create a texture to represent the slot’s content.
-    btn.texture = btn:CreateTexture(nil, "ARTWORK")
-    btn.texture:SetAllPoints(btn)
-    -- btn.texture:SetVertexColor(0.2, 0.2, 0.2, 1)  -- Empty slot color.
-
-    -- Create a font string to show the item count.
-    btn.countText = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    btn.countText:SetPoint("BOTTOMRIGHT", btn, "BOTTOMRIGHT", -2, 2)
-    
-    -- Left-click deposits the cursor item into this slot.
-    btn:SetScript("OnClick", function()
-      if CursorHasItem() then
-        local itemLink = GetCursorItemLink()
-        local count = tonumber(GetCursorItemCount()) or 1
-        local itemID = getIDFromLink(itemLink)
-        BankLayout[this.tabIndex][this.slotIndex] = { itemLink = itemLink, count = (count > 0 and count or 1), itemID = tonumber(itemID) }
-        this.countText:SetText(count)
-        local icon = GetItemIcon(itemLink)
-        if icon then
-          this.texture:SetTexture(icon)
-        end
-        -- ClearCursor()
-        SaveGuildBanksterDB()
-      end
-    end)
-    
-    -- Register for drag events.
-    btn:RegisterForDrag("LeftButton")
-    btn:SetScript("OnDragStart", function()
-      if BankLayout[this.tabIndex][this.slotIndex] then
-        -- Store the dragged item and clear the slot.
-        DraggedItem = BankLayout[this.tabIndex][this.slotIndex]
-        DraggedOrigin = this
-        BankLayout[this.tabIndex][this.slotIndex] = nil
-        this.countText:SetText("")
-        -- this.texture:SetVertexColor(0.2, 0.2, 0.2, 1)
-        this.texture:SetTexture(nil)
-        SaveGuildBanksterDB()
-      end
-    end)
-    btn:SetScript("OnDragStop", function()
-      local target = GetMouseFocus()
-      if target then
-        local slotFrame = target
-        while slotFrame and not slotFrame.slotIndex do
-          slotFrame = slotFrame:GetParent()
-        end
-        if slotFrame and slotFrame.slotIndex then
-          if slotFrame == DraggedOrigin then
-            -- Dropped back on original slot.
-            BankLayout[DraggedOrigin.tabIndex][DraggedOrigin.slotIndex] = DraggedItem
-            DraggedOrigin.countText:SetText(DraggedItem.count)
-            local icon = GetItemIcon(DraggedItem.itemLink)
-            if icon then
-              DraggedOrigin.texture:SetTexture(icon)
-            end
-          elseif BankLayout[slotFrame.tabIndex][slotFrame.slotIndex] then
-              -- Swap the items.
-              local temp = BankLayout[slotFrame.tabIndex][slotFrame.slotIndex]
-              BankLayout[slotFrame.tabIndex][slotFrame.slotIndex] = DraggedItem
-              slotFrame.countText:SetText(DraggedItem.count)
-              local icon = GetItemIcon(DraggedItem.itemLink)
-              if icon then
-                slotFrame.texture:SetTexture(icon)
-              end
-              BankLayout[DraggedOrigin.tabIndex][DraggedOrigin.slotIndex] = temp
-              DraggedOrigin.countText:SetText(temp.count)
-              local icon2 = GetItemIcon(temp.itemLink)
-              if icon2 then
-                DraggedOrigin.texture:SetTexture(icon2)
-              end
-          elseif DraggedItem then
-              -- Place dragged item into target slot.
-              BankLayout[slotFrame.tabIndex][slotFrame.slotIndex] = DraggedItem
-              slotFrame.countText:SetText(DraggedItem.count)
-              local icon = GetItemIcon(DraggedItem.itemLink)
-              if icon then
-                slotFrame.texture:SetTexture(icon)
-              end
-          end
-          DraggedItem = nil
-          DraggedOrigin = nil
-          SaveGuildBanksterDB()
-          return
-        end
-      end
-      -- Dropped off a valid target; discard the dragged item.
-      DraggedItem = nil
-      DraggedOrigin = nil
-      SaveGuildBanksterDB()
-    end)
-    
-    tabFrame.slots[slot] = btn
-  end
-  
-  tabFrames[tab] = tabFrame
-end
-
---------------------------------------------------
--- TAB BUTTONS WITH RIGHT-CLICK TO TOGGLE IGNORED --
---------------------------------------------------
-
-for tab = 1, 6 do
-  local tabButton = CreateFrame("Button", "MockGuildBankTabButton"..tab, MockGuildBankFrame, "UIPanelButtonTemplate")
-  tabButton:SetWidth(80)
-  tabButton:SetHeight(25)
-  tabButton:SetText("Tab " .. tab)
-  tabButton:SetPoint("BOTTOMLEFT", MockGuildBankFrame, "BOTTOMLEFT", 5 + (tab - 1) * 85, 5)
-  tabButton.tabIndex = tab
-  tabButton:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-  
-  tabButton:SetScript("OnClick", function()
-    if arg1 == "RightButton" then
-      -- Toggle ignored state.
-      if ignoredTabs[this.tabIndex] then
-         ignoredTabs[this.tabIndex] = false
-         this:SetText("Tab " .. this.tabIndex)
-      else
-         ignoredTabs[this.tabIndex] = true
-         this:SetText("Tab " .. this.tabIndex .. " (ignored)")
-      end
-      SaveGuildBanksterDB()
-    else
-      -- Left-click: switch to tab if not ignored.
-      if not ignoredTabs[this.tabIndex] then
-         for i = 1, 6 do
-           if (i == this.tabIndex) then
-              tabFrames[i]:Show()
-           else
-              tabFrames[i]:Hide()
-           end
-         end
-      end
-    end
-  end)
-end
-
---------------------------------------------------
--- Control buttons
---------------------------------------------------
-
--- button to drag frame with
-local moveButton = CreateFrame("Button", "PrintBankLayoutButton", MockGuildBankFrame, "UIPanelButtonTemplate")
-moveButton:SetWidth(100)
-moveButton:SetHeight(25)
-moveButton:SetText("Move")
-moveButton:SetPoint("BOTTOMRIGHT", MockGuildBankFrame, "BOTTOMRIGHT", -5, 5)
-moveButton:EnableMouse(true)
--- printButton:SetMovable(true)
-moveButton:RegisterForDrag("LeftButton")
-moveButton:SetScript("OnDragStart", function()
-  this:GetParent():StartMoving()
-end)
-moveButton:SetScript("OnDragStop", function()
-  this:GetParent():StopMovingOrSizing()
-end)
-
-local closeButton = CreateFrame("Button", "CloseBankLayoutButton", MockGuildBankFrame, "UIPanelButtonTemplate")
-closeButton:SetWidth(100)
-closeButton:SetHeight(25)
-closeButton:SetText("CloseAll")
-closeButton:SetPoint("BOTTOM", moveButton, "TOP", 0, 3)
-closeButton:EnableMouse(true)
--- printButton:SetMovable(true)
--- printButton:RegisterForDrag("LeftButton")
-closeButton:SetScript("OnClick", function()
-  MockGuildBankFrame:Hide()
-end)
-
---------------------------------------------------
--- LOAD SAVED DATA ON VARIABLES_LOADED EVENT    --
---------------------------------------------------
-MockGuildBankFrame:SetScript("OnEvent", function ()
-  MockGuildBankFrame[event](this, arg1, arg2, arg3, arg4, arg6, arg7, arg8, arg9, arg10)
-end)
-MockGuildBankFrame:RegisterEvent("VARIABLES_LOADED")
-
-function MockGuildBankFrame:VARIABLES_LOADED()
-  GuildBanksterDB = GuildBanksterDB or {}
-  if GuildBanksterDB.layout then
-    BankLayout = GuildBanksterDB.layout
-    for tab = 1, 6 do
-      local tabFrame = tabFrames[tab]
-      for slot = 1, 98 do
-        local btn = tabFrame.slots[slot]
-        local data = BankLayout[tab][slot]
-        if data then
-          btn.countText:SetText(data.count)
-          local icon = GetItemIcon(data.itemLink)
-          if icon then
-            btn.texture:SetTexture(icon)
-          end
-        else
-          btn.countText:SetText("")
-          -- btn.texture:SetVertexColor(0.2, 0.2, 0.2, 1)
-          btn.texture:SetTexture(nil)
-        end
-      end
-    end
-  end
-  if GuildBanksterDB.ignoredTabs then
-    ignoredTabs = GuildBanksterDB.ignoredTabs
-    for tab = 1, 6 do
-      local tabButton = _G["MockGuildBankTabButton"..tab]
-      if ignoredTabs[tab] then
-        tabButton:SetText("Tab " .. tab .. " (ignored)")
-      else
-        tabButton:SetText("Tab " .. tab)
-      end
-    end
-  end
-  _G["HideBankButton"]:Click()
-end
-
--- Finally, update the global database initially.
-SaveGuildBanksterDB()
 
 --------------------------------------------------
 -- TEMPLATE INTEGRATION WITH GUILD BANK UI
@@ -552,51 +232,6 @@ local TemplateFrames = {}
 local CurrentTemplateTab = 1
 local TemplateMode = false
 
--- Function to import old template data from BankLayout
-function GuildBankster_ImportOldTemplates()
-  if not BankLayout then
-    gb_print("No old template data found to import")
-    return
-  end
-  
-  if not GuildBanksterDB.templates then
-    GuildBanksterDB.templates = {}
-  end
-  
-  local importCount = 0
-  for tab = 1, 6 do
-    if BankLayout[tab] then
-      if not GuildBanksterDB.templates[tab] then
-        GuildBanksterDB.templates[tab] = {}
-      end
-      
-      local slotCount = 0
-      for slot = 1, 98 do
-        if BankLayout[tab][slot] then
-          -- Import the old data structure
-          GuildBanksterDB.templates[tab][slot] = {
-            itemLink = BankLayout[tab][slot].itemLink,
-            count = BankLayout[tab][slot].count or 1,
-            itemID = BankLayout[tab][slot].itemID or tonumber(getIDFromLink(BankLayout[tab][slot].itemLink))
-          }
-          slotCount = slotCount + 1
-        end
-      end
-      
-      if slotCount > 0 then
-        gb_print("Imported " .. slotCount .. " items to template tab " .. tab)
-        importCount = importCount + slotCount
-      end
-    end
-  end
-  
-  if importCount > 0 then
-    gb_print("Successfully imported " .. importCount .. " total items from old templates")
-    SaveGuildBanksterDB()
-  else
-    gb_print("No items found to import")
-  end
-end
 
 -- Create Template bottom tab button
 local function CreateTemplateTab()
@@ -685,13 +320,6 @@ local function CreateTemplateFrame()
   -- Create 98 template slot buttons using the same template as guild bank items
   for slot = 1, 98 do
     local btn = CreateFrame("Button", "GuildBankTemplateSlot"..slot, frame, "GuildBankFrameItemButtonTemplate")
-    if not btn then
-      -- Fallback if template doesn't exist
-      btn = CreateFrame("Button", "GuildBankTemplateSlot"..slot, frame)
-      btn:SetWidth(37)
-      btn:SetHeight(37)
-      gb_print("Using fallback button creation for slot " .. slot)
-    end
     
     -- Use the same positioning logic as the original guild bank items
     local i = slot
@@ -727,7 +355,7 @@ local function CreateTemplateFrame()
     btn:SetScript("OnMouseUp", function()
       -- Also handle mouse up for placing held items after drag
       if HeldTemplateItem and arg1 == "LeftButton" then
-        local template = GuildBanksterDB.templates[CurrentTemplateTab]
+        local template = CurrentGuildSettings.templates[CurrentTemplateTab]
         if template then
           template[this.slotID] = HeldTemplateItem
           GuildBankster_UpdateTemplateDisplay()
@@ -746,7 +374,7 @@ local function CreateTemplateFrame()
     -- Override drag handlers to prevent guild bank item movement
     btn:SetScript("OnDragStart", function()
       -- Handle template item drag the same way guild bank does
-      local template = GuildBanksterDB.templates[CurrentTemplateTab]
+      local template = CurrentGuildSettings.templates[CurrentTemplateTab]
       if template and template[this.slotID] then
         -- Set held template item
         HeldTemplateItem = template[this.slotID]
@@ -780,7 +408,6 @@ local function CreateTemplateFrame()
     TemplateFrames[slot] = btn
   end
   
-  gb_print("Created template slots frame")
   return frame
 end
 
@@ -833,17 +460,17 @@ end
 -- Update template display
 function GuildBankster_UpdateTemplateDisplay()
   -- Initialize templates if needed
-  if not GuildBanksterDB or not GuildBanksterDB.templates then
-    if not GuildBanksterDB then return end
-    GuildBanksterDB.templates = {}
+  if not CurrentGuildSettings then
+    gb_print("Guild settings not initialized")
+    return
   end
   
-  if not GuildBanksterDB.templates[CurrentTemplateTab] then
-    GuildBanksterDB.templates[CurrentTemplateTab] = {}
+  if not CurrentGuildSettings.templates[CurrentTemplateTab] then
+    CurrentGuildSettings.templates[CurrentTemplateTab] = {}
   end
   
-  local template = GuildBanksterDB.templates[CurrentTemplateTab]
-  local isActive = GuildBanksterDB.templateActiveStates and GuildBanksterDB.templateActiveStates[CurrentTemplateTab] or false
+  local template = CurrentGuildSettings.templates[CurrentTemplateTab]
+  local isActive = CurrentGuildSettings.templateActiveStates[CurrentTemplateTab] or false
   
   for slot = 1, 98 do
     local btn = TemplateFrames[slot]
@@ -932,14 +559,14 @@ function GuildBankster_TemplateSlot_OnClick(self)
   local button = arg1  -- Get which mouse button was clicked
   
   -- Initialize template if needed
-  if not GuildBanksterDB or not GuildBanksterDB.templates then
+  if not CurrentGuildSettings then
     return
   end
-  if not GuildBanksterDB.templates[CurrentTemplateTab] then
-    GuildBanksterDB.templates[CurrentTemplateTab] = {}
+  if not CurrentGuildSettings.templates[CurrentTemplateTab] then
+    CurrentGuildSettings.templates[CurrentTemplateTab] = {}
   end
   
-  local template = GuildBanksterDB.templates[CurrentTemplateTab]
+  local template = CurrentGuildSettings.templates[CurrentTemplateTab]
   
   if button == "RightButton" then
     -- Right click: Clear the held item/cursor
@@ -1002,7 +629,7 @@ function GuildBankster_TemplateSlot_OnEnter(self)
   if not self then return end
   local slot = self.slotID
   
-  local template = GuildBanksterDB.templates[CurrentTemplateTab]
+  local template = CurrentGuildSettings.templates[CurrentTemplateTab]
   if template and template[slot] then
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
     -- Extract the item string without the full link format
@@ -1028,11 +655,15 @@ end
 
 -- Hook function variables (declare first)
 local GuildBankFrame_OnShow_Original
+local GuildBankFrame_OnHide_Original
 local GuildBankFrameBottomTab_OnClick_Original
 local GuildBankFrameTab_OnClick_Original
 
 -- Hook into guild bank frame show
 local function GuildBankster_OnGuildBankShow(a,b,c,d,e,f)
+  -- Initialize guild-specific settings
+  InitializeGuildSettings()
+  
   -- Template tab is now created at top level, no need to create here
 
   if GuildBank.currentTab ~= nil then
@@ -1044,6 +675,44 @@ local function GuildBankster_OnGuildBankShow(a,b,c,d,e,f)
   -- Call original if exists
   if GuildBankFrame_OnShow_Original then
     GuildBankFrame_OnShow_Original(a,b,c,d,e,f)
+  end
+end
+
+-- Hook into guild bank frame hide
+local function GuildBankster_OnGuildBankHide()
+  -- Clear restock queue
+  if gbank_queue then
+    for i = 1, table.getn(gbank_queue) do
+      gbank_queue[i] = nil
+    end
+  end
+  
+  -- Reset restock state
+  if GuildBankster then
+    GuildBankster:ResetRestock()
+  end
+  
+  -- Close all bags
+  CloseAllBags()
+  
+  -- Close bank frame if open
+  if BankFrame and BankFrame:IsVisible() then
+    CloseBankFrame()
+  end
+  
+  -- Clear any held template items
+  if HeldTemplateItem then
+    HeldTemplateItem = nil
+  end
+  
+  -- Hide guild bank cursor frame if showing
+  if GuildBankFrameCursorItemFrame then
+    GuildBankFrameCursorItemFrame:Hide()
+  end
+  
+  -- Call original if exists
+  if GuildBankFrame_OnHide_Original then
+    GuildBankFrame_OnHide_Original()
   end
 end
 
@@ -1083,8 +752,8 @@ local function GuildBankster_Tab_OnClick(id)
   -- We're in template mode, handle template functionality
   if arg1 == "RightButton" then
     -- Toggle active state for this template
-    GuildBanksterDB.templateActiveStates[id] = not GuildBanksterDB.templateActiveStates[id]
-    local state = GuildBanksterDB.templateActiveStates[id] and "active" or "inactive"
+    CurrentGuildSettings.templateActiveStates[id] = not CurrentGuildSettings.templateActiveStates[id]
+    local state = CurrentGuildSettings.templateActiveStates[id] and "active" or "inactive"
     gb_print("Template " .. id .. " is now " .. state)
     GuildBankster_UpdateTemplateDisplay()
     return
@@ -1117,6 +786,9 @@ if GuildBankFrame then
   
   GuildBankFrame_OnShow_Original = GuildBankFrame_OnShow
   GuildBankFrame_OnShow = GuildBankster_OnGuildBankShow
+  
+  GuildBankFrame_OnHide_Original = GuildBankFrame_OnHide
+  GuildBankFrame_OnHide = GuildBankster_OnGuildBankHide
 end
 
 if GuildBankFrameBottomTab_OnClick then
@@ -1127,90 +799,6 @@ end
 if GuildBankFrameTab_OnClick then
   GuildBankFrameTab_OnClick_Original = GuildBankFrameTab_OnClick
   GuildBankFrameTab_OnClick = GuildBankster_Tab_OnClick
-end
-
-
--- Export function to apply template to actual bank
-function GuildBankster_ApplyTemplateToBank()
-  if not CurrentTemplateTab or not GuildBanksterDB.templates[CurrentTemplateTab] then
-    gb_print("No template selected")
-    return
-  end
-  
-  -- Copy template to BankLayout for the restock system to use
-  BankLayout[CurrentTemplateTab] = {}
-  for slot = 1, 98 do
-    if GuildBanksterDB.templates[CurrentTemplateTab][slot] then
-      BankLayout[CurrentTemplateTab][slot] = GuildBanksterDB.templates[CurrentTemplateTab][slot]
-    end
-  end
-  
-  gb_print("Template " .. CurrentTemplateTab .. " ready for restocking")
-end
-
--- Copy current guild bank tab to template
-function GuildBankster_CopyBankToTemplate()
-  if not CurrentTemplateTab then
-    gb_print("No template tab selected")
-    return
-  end
-  
-  if not GuildBank or not GuildBank.currentTab then
-    gb_print("Guild bank not available")
-    return
-  end
-  
-  local bankTab = GuildBank.currentTab
-  if not GuildBank.tabs or not GuildBank.tabs[bankTab] then
-    gb_print("Guild bank tab " .. bankTab .. " not available")
-    return
-  end
-  
-  -- Initialize template tab if needed
-  if not GuildBanksterDB.templates[CurrentTemplateTab] then
-    GuildBanksterDB.templates[CurrentTemplateTab] = {}
-  end
-  
-  -- Copy items from guild bank to template
-  local copiedCount = 0
-  for slot = 1, 98 do
-    local item = GuildBank.tabs[bankTab][slot]
-    if item and item.link then
-      local itemID = getIDFromLink(item.link)
-      GuildBanksterDB.templates[CurrentTemplateTab][slot] = {
-        itemLink = item.link,
-        count = item.count or 1,
-        itemID = tonumber(itemID)
-      }
-      copiedCount = copiedCount + 1
-    else
-      GuildBanksterDB.templates[CurrentTemplateTab][slot] = nil
-    end
-  end
-  
-  -- Update display if in template mode
-  if TemplateMode then
-    GuildBankster_UpdateTemplateDisplay()
-  end
-  
-  gb_print("Copied " .. copiedCount .. " items from guild bank tab " .. bankTab .. " to template " .. CurrentTemplateTab)
-end
-
--- Clear current template
-function GuildBankster_ClearTemplate()
-  if not CurrentTemplateTab then
-    gb_print("No template tab selected")
-    return
-  end
-  
-  GuildBanksterDB.templates[CurrentTemplateTab] = {}
-  
-  -- Update display if in template mode
-  if TemplateMode then
-    GuildBankster_UpdateTemplateDisplay()
-  end
-  
-  gb_print("Cleared template " .. CurrentTemplateTab)
 end
 
 --------------------------------------------------
@@ -1292,40 +880,6 @@ GuildBankster.actions = {
   moveItems = "moveItems",
 }
 
---------------------------------------------------
--- DIAGNOSTIC: Test BAG_UPDATE counts for different operations
---------------------------------------------------
-local bag_update_diagnostic = {
-  active = false,
-  count = 0,
-  operation = "",
-  start_time = 0,
-  timeout = 3, -- seconds to wait before resetting
-}
-
-function GuildBankster:StartBagDiagnostic(operation)
-  bag_update_diagnostic.active = true
-  bag_update_diagnostic.count = 0
-  bag_update_diagnostic.operation = operation
-  bag_update_diagnostic.start_time = GetTime()
-end
-
-function GuildBankster:EndBagDiagnostic()
-  if bag_update_diagnostic.active then
-    bag_update_diagnostic.active = false
-  end
-end
-
-function GuildBankster:TestBankToInventoryMoves()
-end
-
-function GuildBankster:TestMove(moveType)
-  self:StartBagDiagnostic(moveType)
-  -- User performs the move manually
-  -- Diagnostic will track BAG_UPDATE events
-  -- After 5 seconds or manual call to EndBagDiagnostic, results are printed
-end
-
 -- Verify that expected inventory changes occurred
 local function VerifyInventoryChange(operation, pre_state)
   if operation.type == "deposit" then
@@ -1394,15 +948,6 @@ function GuildBankster:ResetRestock()
 end
 
 function GuildBankster:BAG_UPDATE(which)
-  -- Track diagnostic events if active
-  if bag_update_diagnostic.active then
-    bag_update_diagnostic.count = bag_update_diagnostic.count + 1
-    -- Auto-end diagnostic after timeout
-    if GetTime() - bag_update_diagnostic.start_time > bag_update_diagnostic.timeout then
-      self:EndBagDiagnostic()
-    end
-  end
-  
   -- Continuation-based processing - check if operation completed successfully
   if continuation_active and current_operation.type and pre_operation_state then
     local success = VerifyInventoryChange(current_operation, pre_operation_state)
@@ -1610,10 +1155,12 @@ local function RestockBankFromAllSources()
   table.insert(gbank_queue, { type = GuildBankster.actions.print, args = { "Beginning Guildbank restock from all sources..." } })
 
   for tab = 1, 6 do
-    if not ignoredTabs[tab] then
+    -- Check if template is active
+    local isActive = CurrentGuildSettings.templateActiveStates[tab]
+    if isActive then
       local currentItems = ScanGuildBank(tab)
       for slot = 1, 98 do
-        local desired = BankLayout[tab][slot]
+        local desired = CurrentGuildSettings.templates[tab] and CurrentGuildSettings.templates[tab][slot]
         if desired then
           local current = currentItems[slot]
           local missing = desired.count
@@ -1900,8 +1447,10 @@ function GuildBankster:RestockBankStepwise()
 
   local job_i = 1
   for tab = 1, 6 do
-    if not ignoredTabs[tab] then
-      local desired_layout = BankLayout[tab]
+    -- Check if template is active
+    local isActive = CurrentGuildSettings.templateActiveStates[tab]
+    if isActive then
+      local desired_layout = CurrentGuildSettings.templates[tab]
       local current = ScanGuildBank(tab)
       for slot = 1, 98 do
         local want = desired_layout[slot]
@@ -1973,7 +1522,7 @@ function GuildBankster:RestockBankster_NextJob()
   local job = restock_jobs[1]
   if not job then
     if next(missing_totals) then
-      local lines = { "The insufficient inventory to stock:" }
+      local lines = { "Insufficient inventory to stock:" }
       for itemID, count in pairs(missing_totals) do
         table.insert(lines, string.format("%d : %s", count, GetItemInfo("item:"..itemID) or ("item:"..itemID)))
       end
@@ -1987,6 +1536,11 @@ function GuildBankster:RestockBankster_NextJob()
     for k in pairs(missing_totals) do missing_totals[k] = nil end
     continuation_active = false  -- Clear continuation state when done
     return
+  end
+
+  -- Switch to the correct tab as soon as we know which tab we need
+  if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
+    GuildBankFrameTab_OnClick(job.tab)
   end
 
   -- Handle consolidation jobs
@@ -2189,10 +1743,6 @@ function GuildBankster:RestockBankster_NextJob()
         operation_retry_count = 0
         
         
-        -- Switch to correct tab if needed
-        if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
-          GuildBankFrameTab_OnClick(job.tab)
-        end
         
         last_action_time = GetTime()
         continuation_active = true
@@ -2374,10 +1924,7 @@ function GuildBankster:RestockBankster_NextJob()
     end
     
     if bag then
-      -- item found, switch to the tab we're working on if it's different from current
-      if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
-        GuildBankFrameTab_OnClick(job.tab)
-      end
+      -- item found
 
       -- Track operation for debugging and verification
       current_operation = {
@@ -2495,10 +2042,12 @@ local function RestockBank()
 
   table.insert(gbank_queue, { type = GuildBankster.actions.print, args = { "Beginning Guildbank restock..." } })
   for tab = 1, 6 do
-    if not ignoredTabs[tab] then
+    -- Check if template is active
+    local isActive = CurrentGuildSettings.templateActiveStates[tab]
+    if isActive then
       local currentItems = ScanGuildBank(tab)
       for slot = 1, 98 do
-        local desired = BankLayout[tab][slot]
+        local desired = CurrentGuildSettings.templates[tab] and CurrentGuildSettings.templates[tab][slot]
         if desired then
           local current = currentItems[slot]
           local missing = desired.count
@@ -2557,32 +2106,6 @@ local function RestockBank()
   GuildBankster:ProgressQueue()
 end
 
---------------------------------------------------
--- RESTOCK BUTTON: When pressed, trigger the RestockBank function.
---------------------------------------------------
-local restockButton = CreateFrame("Button", "RestockBankButton", MockGuildBankFrame, "UIPanelButtonTemplate")
-restockButton:SetWidth(100)
-restockButton:SetHeight(25)
-restockButton:SetText("Restock Bank")
-restockButton:SetPoint("BOTTOM", MockGuildBankFrame, "BOTTOM", 0, 40)
-restockButton:SetScript("OnClick", function()
-  GuildBankster:RestockBankStepwise()
-  -- RestockBankFromAllSources()
-end)
-
---------------------------------------------------
--- HIDE BUTTON: When pressed, trigger the RestockBank function.
---------------------------------------------------
-local hideButton = CreateFrame("Button", "HideBankButton", MockGuildBankFrame, "UIPanelButtonTemplate")
-hideButton:SetWidth(100)
-hideButton:SetHeight(25)
-hideButton:SetText("Hide Templates")
-hideButton:SetPoint("BOTTOM", MockGuildBankFrame, "BOTTOM", -100, 40)
-hideButton:SetScript("OnClick", function()
-  for i=1,6 do
-    _G["MockGuildBankTabFrame"..i]:Hide()
-  end
-end)
 
 -- stuff bank needs:
 -- -- essence of air

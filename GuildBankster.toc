@@ -4,7 +4,7 @@
 ## X-Category: Interface Enhancements
 ## X-Date: 2024-05-06
 ## X-Website: https://github.com/MarcelineVQ/GuildBankster
-## Version: 1.0
+## Version: 2.0
 ## SavedVariables: GuildBanksterDB
 
 GuildBankster.lua

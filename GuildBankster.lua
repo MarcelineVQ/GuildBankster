@@ -1,5 +1,45 @@
+--==============================================================================
+-- GUILDBANKSTER: Template-based Guild Bank Management for Turtle WoW
+--==============================================================================
+-- File: GuildBankster.lua
+-- Author: Weird Vibes Guild <Turtle WoW>
+-- Version: 2.0
+-- Created: 2024
+-- 
+-- Description:
+--   A comprehensive addon that provides template-based guild bank management
+--   and automated restocking capabilities for World of Warcraft 1.12 (Turtle WoW).
+--
+-- Features:
+--   • Template System: Define what items should be stored in each guild bank slot
+--   • Automated Restocking: Automatically restock from inventory and personal bank
+--   • Per-Guild Settings: Settings are saved separately for each guild
+--   • Visual Integration: Seamlessly integrates with Turtle WoW's guild bank UI
+--   • Smart Consolidation: Intelligently combines and moves items for efficiency
+--
+-- Dependencies:
+--   • Turtle WoW Guild Bank UI (TW_GUILDBANK)
+--   • World of Warcraft 1.12 client
+--
+-- Usage:
+--   1. Open guild bank and click "Templates" tab
+--   2. Drag items to template slots to define desired layout
+--   3. Right-click template tabs to activate/deactivate them  
+--   4. Click "Restock" button to automatically fill active templates
+--
+-- License: MIT License - Free for use and modification
+--==============================================================================
+
 local _G = _G or getfenv(0)
 
+--==============================================================================
+-- NPC DATA: Vault Keepers and Banking NPCs
+--==============================================================================
+-- Purpose: Static data for NPC identification and location mapping
+-- Used by: Event handlers for bank integration and gossip system
+--==============================================================================
+
+-- Vault keeper NPCs mapped to their cities (unused but kept for reference)
 local vault_npcs = {
   ["Vault Keeper Faredin"] = "Darnassus",
   ["Vault Keeper Teller Plushner"] = "Stormwind",
@@ -22,7 +62,14 @@ local in_range_npc = {
   ["Forworn Mule"] = { name = "Forworn Mule", city = "any" },
 }
 
--- Constants
+--==============================================================================
+-- CONFIGURATION & CONSTANTS  
+--==============================================================================
+-- Purpose: Centralized configuration values and game constants
+-- Dependencies: None - these are the base configuration values
+--==============================================================================
+
+-- Core game constants
 local MAX_TABS = 5
 local MAX_SLOTS = 98
 local MAX_RETRIES = 3
@@ -32,7 +79,13 @@ local RESTOCK_TIMEOUT = 2 -- seconds before forcing next job if stuck
 local bank_bag_ids = {-1, 5, 6, 7, 8, 9, 10}
 local ordered_bags = {0, 1, 2, 3, 4, -1, 5, 6, 7, 8, 9, 10}
 
--- State variables
+--==============================================================================
+-- STATE MANAGEMENT: Global Variables and Runtime State
+--==============================================================================
+-- Purpose: All mutable state variables organized by functional area
+-- Dependencies: Constants (above) - uses MAX_TABS, MAX_SLOTS, etc.
+-- Used by: All major systems throughout the addon
+--==============================================================================
 -- Restock variables (defined early so OnUpdate can access them)
 local restock_jobs = {} -- Array of job tables; always shift after completion
 local missing_totals = {} -- [itemID] = total_missing
@@ -63,21 +116,37 @@ local GuildBankFrame_OnHide_Original
 local GuildBankFrameBottomTab_OnClick_Original
 local GuildBankFrameTab_OnClick_Original
 
---------------------------------------------------
--- UTILITY FUNCTIONS
---------------------------------------------------
+--==============================================================================
+-- CORE UTILITIES: Helper Functions and WoW API Wrappers
+--==============================================================================
+-- Purpose: Essential utility functions used throughout the addon
+-- Dependencies: State variables (above) for gb_print function
+-- Used by: All major systems - these are the foundation functions
+--==============================================================================
 
+-- Function: gb_print
+-- Purpose: Standardized addon message printing with consistent formatting  
+-- Parameters: msg (string) - message to display in chat
+-- Used by: All systems throughout addon for user communication
 local function gb_print(msg)
   DEFAULT_CHAT_FRAME:AddMessage("|cff14a868GuildBankster:|r "..msg)
 end
 
--- Extract the item ID from an itemLink
+-- Function: getIDFromLink  
+-- Purpose: Extract numeric item ID from WoW item link string
+-- Parameters: link (string) - WoW item link format "|Hitem:12345:...|h"
+-- Returns: string - numeric item ID, or nil if parsing fails
+-- Used by: All inventory and template systems for item identification
 function getIDFromLink(link)
   local _, _, id = string.find(link, "item:(%d+)")
   return id
 end
 
--- GetItemIcon for vanilla WoW: returns the ninth value from GetItemInfo
+-- Function: GetItemIcon
+-- Purpose: Get item texture path for vanilla WoW (extracts 9th return value from GetItemInfo)
+-- Parameters: itemLink (string) - WoW item link  
+-- Returns: string - texture path for item icon, or nil if item not found
+-- Used by: Template system for displaying item icons in template slots
 function GetItemIcon(itemLink)
     if not itemLink then return nil end
     local itemID = getIDFromLink(itemLink)
@@ -91,7 +160,11 @@ function GetItemIcon(itemLink)
     return nil
 end
 
--- Find the frame object
+-- Function: findGuildBankFrame
+-- Purpose: Locate Turtle WoW's guild bank frame object by searching all frames
+-- Returns: frame object - TW_GUILDBANK frame, or nil if not found  
+-- Used by: Frame initialization during addon load
+-- Note: Critical for integration with Turtle WoW's guild bank system
 function findGuildBankFrame()
   local f = EnumerateFrames()
   while f do
@@ -110,6 +183,19 @@ local function ScanGuildBank(tab)
   return items
 end
 
+--==============================================================================
+-- WOW INTEGRATION: Frame Management and Event Handlers  
+--==============================================================================
+-- Purpose: Core WoW client integration, frame setup, and event processing
+-- Dependencies: Core utilities (above), NPC data, constants
+-- Used by: Template system, restock engine, and UI integration
+-- Entry Points: Event handlers (BANKFRAME_OPENED, GOSSIP_SHOW, etc.)
+--==============================================================================
+
+-- Function: SpoofGossip
+-- Purpose: Programmatically opens guild bank by manipulating WoW UI panels
+-- Dependencies: findGuildBankFrame utility function
+-- Called by: BANKFRAME_OPENED event handler
 function SpoofGossip()
   UIPanelWindows.GossipFrame.pushable = 99
   local centerFrame = (GetCenterFrame())
@@ -127,6 +213,7 @@ function SpoofGossip()
   end
 end
 
+-- Provide GuildBank globally so other addons don't have to search for it
 GuildBank = findGuildBankFrame()
 GuildBankster = CreateFrame("Frame")
 
@@ -203,14 +290,24 @@ GuildBankster:SetScript("OnEvent",function ()
   GuildBankster[event](this,arg1,arg2,arg3,arg4,arg6,arg7,arg8,arg9,arg10)
 end)
 
---------------------------------------------------
--- GLOBAL PERSISTENT DATABASE INITIALIZATION    --
---------------------------------------------------
+--==============================================================================
+-- DATABASE & SETTINGS: Persistent Storage and Guild Management
+--==============================================================================
+-- Purpose: Per-guild settings storage, initialization, and management
+-- Dependencies: Core utilities (gb_print), constants (MAX_TABS)
+-- Used by: Template system, restock engine
+-- Data Structure: GuildBanksterDB[guildName] = {templates, templateActiveStates}
+--==============================================================================
 GuildBanksterDB = GuildBanksterDB or {}
 
 -- Current guild settings (set when guild bank frame shows)
 
--- Initialize guild-specific settings when guild bank opens
+-- Function: InitializeGuildSettings  
+-- Purpose: Initialize per-guild settings storage when guild bank opens
+-- Dependencies: GuildBank frame data, database system
+-- Called by: GuildBankster_OnGuildBankShow hook
+-- Cross-reference: See Template System (below) - consumes these settings
+-- Cross-reference: See Restock Engine (below) - uses templateActiveStates
 local function InitializeGuildSettings()
   local guildName = "DEFAULT"
   if GuildBank and GuildBank.guildInfo and GuildBank.guildInfo.name then
@@ -232,21 +329,31 @@ local function InitializeGuildSettings()
   gb_print("Loaded settings for guild: " .. guildName)
 end
 
+--==============================================================================
+-- TEMPLATE SYSTEM: UI Creation and Template Management
+--==============================================================================
+-- Purpose: Complete template system including UI creation, interaction handling,
+--          and integration with Turtle WoW's guild bank interface
+-- Dependencies: Database settings, state management, core utilities
+-- Used by: Restock engine (reads template definitions)
+-- Components: UI creation, event handling, display updates, state management
+-- Entry Point: GuildBankster_TemplateTab_OnClick() when Templates tab clicked
+--==============================================================================
 
 
---------------------------------------------------
--- TEMPLATE INTEGRATION WITH GUILD BANK UI
---------------------------------------------------
+-- SECTION: UI Creation Functions
+-- Cross-reference: See UI Hooks (below) - these functions called during frame setup
 
-
--- Create Template bottom tab button
+-- Function: CreateTemplateTab  
+-- Purpose: Create the "Templates" tab button and "Restock" button in guild bank UI
+-- Returns: templateTab frame - the created template tab button
+-- Called by: Hook initialization when guild bank frame exists
+-- Cross-reference: See Restock Engine (below) - Restock button triggers RestockBankStepwise
 local function CreateTemplateTab()
   if not GuildBankFrame then return end
 
   -- Create the Template tab button using the same template as other bottom tabs
   local templateTab = CreateFrame("Button", "GuildBankFrameBottomTab4", GuildBankFrame, "TWGuildFrameBottomTabButtonTemplate")
-  -- templateTab:SetWidth(120)
-  -- templateTab:SetHeightWidth(120)
   templateTab:SetPoint("LEFT", GuildBankFrameBottomTab3, "RIGHT", -10, 0)
   templateTab:SetID(4)
   templateTab:SetText("Templates")
@@ -289,7 +396,6 @@ local function CreateTemplateTab()
       GuildBankFrameTab_OnClick(1)
     end
     -- Start restock process
-    -- print("restok")
     GuildBankster:RestockBankStepwise()
   end)
   restockButton:SetScript("OnMouseUp", function()
@@ -417,8 +523,6 @@ local function CreateTemplateFrame()
   return frame
 end
 
--- Store original SetText function for the tab title
-
 -- Update template title with current tab and active/inactive status
 local function UpdateTemplateTitle(tabId)
   if CurrentGuildSettings and GuildBankFrameTabTitle and GuildBankFrameTabTitle_SetText_Original then
@@ -489,8 +593,7 @@ function GuildBankster_TemplateTab_OnClick()
     GuildBankFrameBottomTab_Enable(GuildBankFrameBottomTab4)
   end
 
-  -- NOW simulate a click on the current template tab to update title and display
-  -- Everything is fully set up so the click handler will work correctly
+  -- Simulate a click on the current template tab to update title and display
   if _G["GuildBankFrameTab" .. CurrentTemplateTab] then
     _G["GuildBankFrameTab" .. CurrentTemplateTab]:Click()
   end
@@ -640,8 +743,6 @@ function GuildBankster_UpdateTemplateDisplay()
 
 end
 
--- Track what template item is being "held"
-
 -- Handle template slot click
 function GuildBankster_TemplateSlot_OnClick(self)
   if not self then return end
@@ -743,9 +844,18 @@ function GuildBankster_TemplateSlot_OnEnter(self)
   end
 end
 
--- Hook function variables (declare first)
+--==============================================================================
+-- UI HOOKS & INTEGRATION: Guild Bank Frame Integration
+--==============================================================================  
+-- Purpose: Hooks into Turtle WoW's guild bank system to integrate template functionality
+-- Dependencies: Template system (above), database settings, state management
+-- Used by: Template system relies on these hooks to function properly
+-- Integration Points: Frame show/hide, tab clicks, bottom tab system
+--==============================================================================
 
--- Hook into guild bank frame show
+-- Function: GuildBankster_OnGuildBankShow
+-- Purpose: Initialize guild settings and refresh display when guild bank opens
+-- Called by: Hooked GuildBankFrame_OnShow
 local function GuildBankster_OnGuildBankShow(a,b,c,d,e,f)
   -- Initialize guild-specific settings
   InitializeGuildSettings()
@@ -841,8 +951,12 @@ local function GuildBankster_Tab_OnClick(id)
   if arg1 == "RightButton" then
     -- Toggle active state for this template
     CurrentGuildSettings.templateActiveStates[id] = not CurrentGuildSettings.templateActiveStates[id]
-    local state = CurrentGuildSettings.templateActiveStates[id] and "active" or "inactive"
-    gb_print("Template " .. id .. " is now " .. state)
+    local coloredState = CurrentGuildSettings.templateActiveStates[id] and "|cFF00FF00active|r" or "|cFFFF0000inactive|r"
+    local tabName = "Template " .. id
+    if GuildBank and GuildBank.tabs and GuildBank.tabs.info and GuildBank.tabs.info[id] and GuildBank.tabs.info[id].name then
+      tabName = GuildBank.tabs.info[id].name
+    end
+    gb_print("(" .. tabName .. ") template " .. coloredState)
 
     -- Update tab title if this is the current template
     if id == CurrentTemplateTab then
@@ -901,10 +1015,15 @@ if GuildBankFrameTab_OnClick then
   GuildBankFrameTab_OnClick = GuildBankster_Tab_OnClick
 end
 
-
---------------------------------------------------
--- CONTINUATION SYSTEM: Event-driven processing
---------------------------------------------------
+--==============================================================================
+-- CONTINUATION SYSTEM: Event-Driven Processing Framework
+--==============================================================================
+-- Purpose: Asynchronous operation management with timeout handling and verification
+-- Dependencies: State management, core utilities, constants (RESTOCK_TIMEOUT)  
+-- Used by: Restock engine for managing complex multi-step operations
+-- Components: Timeout detection, operation verification, queue management
+-- Entry Point: BAG_UPDATE event handler triggers continuation processing
+--==============================================================================
 
 -- OnUpdate only for timeout checking
 continuation_frame:SetScript("OnUpdate", function()
@@ -1058,10 +1177,16 @@ function GuildBankster:BAG_UPDATE(which)
   end
 end
 
-
---------------------------------------------------
--- HELPER FUNCTIONS FOR INVENTORY SIMULATION
---------------------------------------------------
+--==============================================================================
+-- INVENTORY MANAGEMENT: Bag Scanning and Item Location Services
+--==============================================================================
+-- Purpose: Comprehensive inventory management including bag scanning, bank interaction,
+--          and intelligent item location and consolidation planning
+-- Dependencies: Core utilities, constants (bank_bag_ids, ordered_bags)
+-- Used by: Restock engine for item discovery and movement planning  
+-- Components: Bag scanning, state capture, item finding, consolidation planning
+-- See also: Restock engine (below) - primary consumer of these services
+--==============================================================================
 
 -- Rescan bags for current inventory state
 local function RescanBags()
@@ -1290,7 +1415,21 @@ local function FindEmptyBagSlot()
   return nil, nil
 end
 
--- (1) Build restock jobs (call this on button)
+--==============================================================================
+-- RESTOCK ENGINE: Automated Template-Based Guild Bank Restocking
+--==============================================================================
+-- Purpose: Core restocking functionality that automatically fills guild bank slots
+--          based on active templates using items from inventory and personal bank
+-- Dependencies: All above systems - templates, inventory management, continuation system
+-- Components: Job planning, execution engine, consolidation logic, error handling
+-- Entry Point: RestockBankStepwise() - called by Restock button click
+-- Architecture: Two-phase system - job planning then stepwise execution
+--==============================================================================
+
+-- PHASE 1: Job Planning and Queueing
+-- Function: RestockBankStepwise  
+-- Purpose: Main entry point - analyzes templates vs current state and builds job queue
+-- Called by: Restock button click handler in template system
 function GuildBankster:RestockBankStepwise()
   print("Beginning Guildbank restock...")
   -- Clear previous jobs by nil'ing all values
@@ -1369,7 +1508,11 @@ function GuildBankster:RestockBankStepwise()
   GuildBankster:RestockBankster_NextJob()
 end
 
--- (2) Stepwise dispatcher
+-- PHASE 2: Job Execution Engine  
+-- Function: RestockBankster_NextJob
+-- Purpose: Processes job queue one item at a time using continuation system
+-- Handles: Consolidation jobs, direct deposits, withdrawals, stack combinations
+-- Called by: Continuation system after each operation completes
 function GuildBankster:RestockBankster_NextJob()
   local job = restock_jobs[1]
   if not job then
@@ -1887,3 +2030,4 @@ function GuildBankster:RestockBankster_NextJob()
     return
   end
 end
+

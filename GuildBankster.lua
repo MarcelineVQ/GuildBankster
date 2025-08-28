@@ -1538,10 +1538,6 @@ function GuildBankster:RestockBankster_NextJob()
     return
   end
 
-  -- Switch to the correct tab as soon as we know which tab we need
-  if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
-    GuildBankFrameTab_OnClick(job.tab)
-  end
 
   -- Handle consolidation jobs
   if job.type == "consolidation" then
@@ -1725,6 +1721,11 @@ function GuildBankster:RestockBankster_NextJob()
       end
       
       if bag and to_deposit > 0 then
+        -- item found for consolidation job - switch to the correct tab now that we have an item to place
+        if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
+          GuildBankFrameTab_OnClick(job.tab)
+        end
+        
         -- Deposit the full amount available (all items are now consolidated)
         local actual_amount = to_deposit
         -- Track operation for debugging and verification
@@ -1924,7 +1925,10 @@ function GuildBankster:RestockBankster_NextJob()
     end
     
     if bag then
-      -- item found
+      -- item found - switch to the correct tab now that we have an item to place
+      if job.tab and GuildBank and GuildBank.currentTab ~= job.tab then
+        GuildBankFrameTab_OnClick(job.tab)
+      end
 
       -- Track operation for debugging and verification
       current_operation = {

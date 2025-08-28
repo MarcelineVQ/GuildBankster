@@ -39,8 +39,8 @@ An addon for Turtle WoW that provides template-based guild bank management and a
 
 ## Bank NPCs for Enhanced Banking
 
-Restocking the Guild Bank from your Player Bank can be done by having a Player Bank open via a mobile bank when using the Guild Bank interface, but characters without a mobile bank can still bank restock by speaking with the following npcs:
-
+Restocking the Guild Bank from your Player Bank can be done by having a Player Bank open via a mobile bank when using the Guild Bank interface.  
+Characters without a mobile bank can still bank restock by speaking (at maximum range) with the following npcs:
 * **Horde banks:**
   * Orgrimmar: Koma
   * Undercity: Randolph Montague

@@ -160,6 +160,60 @@ function GetItemIcon(itemLink)
     return nil
 end
 
+-- Function: ClearTemplateCursor
+-- Purpose: Clear all cursor states (both template held items and guild bank cursor frames)
+-- Used by: Template system when canceling operations or clearing cursor
+local function ClearTemplateCursor()
+    -- Clear template held item
+    HeldTemplateItem = nil
+
+    -- Hide guild bank cursor frames
+    if GuildBank and GuildBank.cursorFrame then
+        GuildBank.cursorFrame:Hide()
+    end
+    if GuildBankFrameCursorItemFrame then
+        GuildBankFrameCursorItemFrame:Hide()
+    end
+    ClearCursor()
+end
+
+-- Function: IsItemBound
+-- Purpose: Check if an item in a bag slot is bound (soulbound) using tooltip scanning
+-- Parameters: bag (number), slot (number) - container and slot to check
+-- Returns: boolean - true if item is bound, false otherwise
+-- Used by: Template system to warn about bound items
+local function IsItemBound(bag, slot)
+  -- Create or reuse hidden tooltip for scanning
+  local tooltip = getglobal("GuildBanksterBindTooltip")
+  if not tooltip then
+    tooltip = CreateFrame("GameTooltip", "GuildBanksterBindTooltip", nil, "GameTooltipTemplate")
+    tooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
+  end
+
+  -- Set tooltip to the bag item
+  tooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
+  tooltip:SetBagItem(bag, slot)
+
+  -- Scan tooltip text for binding keywords
+  for i = 1, tooltip:NumLines() do
+    local line = getglobal("GuildBanksterBindTooltipTextLeft" .. i)
+    if line then
+      local text = line:GetText()
+      if text then
+        -- Check for various binding texts
+        if strfind(text, "Soulbound") or
+          strfind(text, "Binds when picked up") then
+          tooltip:Hide()
+          return true
+        end
+      end
+    end
+  end
+
+  tooltip:Hide()
+  return false
+end
+
 -- Function: findGuildBankFrame
 -- Purpose: Locate Turtle WoW's guild bank frame object by searching all frames
 -- Returns: frame object - TW_GUILDBANK frame, or nil if not found  
@@ -762,14 +816,7 @@ function GuildBankster_TemplateSlot_OnClick(self)
   if button == "RightButton" then
     -- Right click: Clear the held item/cursor
     if HeldTemplateItem then
-      HeldTemplateItem = nil
-      -- Also hide the guild bank cursor if showing
-      if GuildBank and GuildBank.cursorFrame then
-        GuildBank.cursorFrame:Hide()
-      end
-      if GuildBankFrameCursorItemFrame then
-        GuildBankFrameCursorItemFrame:Hide()
-      end
+      ClearTemplateCursor()
     elseif template[slot] then
       -- If no held item, clear the slot
       template[slot] = nil
@@ -779,9 +826,35 @@ function GuildBankster_TemplateSlot_OnClick(self)
     -- Left click: Handle item placement and pickup
     if CursorHasItem() then
       -- Drop item from cursor into template slot (don't clear cursor)
-      local itemLink = GetCursorItemLink()
-      local count = tonumber(GetCursorItemCount()) or 1
-      local itemID = getIDFromLink(itemLink)
+      -- Use Turtle WoW's cursor tracking system
+
+      local itemLink, count, itemID
+      if GuildBank and GuildBank.cursorItem and GuildBank.cursorItem.from == "bag" then
+        local bag = GuildBank.cursorItem.tab
+        local slot = GuildBank.cursorItem.slot
+
+        -- Get item link and count from the tracked source location
+        local containerItemLink = GetContainerItemLink(bag, slot)
+        if containerItemLink then
+          itemLink = containerItemLink
+          local texture, itemCount = GetContainerItemInfo(bag, slot)
+          count = itemCount and (itemCount > 0 and itemCount or 1) or 1
+          itemID = getIDFromLink(itemLink)
+
+          -- Check if item is bound and warn user
+          if IsItemBound(bag, slot) then
+            local itemName = GetItemInfo(itemID) or "Unknown Item"
+            gb_print("|cFFFF6600Warning:|r " .. itemName .. " is soulbound and cannot be shared with guild members.")
+            ClearTemplateCursor()
+            return
+          end
+        end
+      end
+
+      if not itemLink then
+        gb_print("Unable to get cursor item information")
+        return
+      end
 
       template[slot] = {
         itemLink = itemLink,

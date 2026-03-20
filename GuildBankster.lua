@@ -214,20 +214,6 @@ local function IsItemBound(bag, slot)
   return false
 end
 
--- Function: findGuildBankFrame
--- Purpose: Locate Turtle WoW's guild bank frame object by searching all frames
--- Returns: frame object - TW_GUILDBANK frame, or nil if not found  
--- Used by: Frame initialization during addon load
--- Note: Critical for integration with Turtle WoW's guild bank system
-function findGuildBankFrame()
-  local f = EnumerateFrames()
-  while f do
-    if f.prefix and f.prefix == "TW_GUILDBANK" then
-      return f
-    end
-    f = EnumerateFrames(f)
-  end
-end
 
 local function ScanGuildBank(tab)
   local items = {}
@@ -246,15 +232,12 @@ end
 -- Entry Points: Event handlers (BANKFRAME_OPENED, GOSSIP_SHOW, etc.)
 --==============================================================================
 
--- Function: SpoofGossip
+-- Function: SpoofGuildBankGossip
 -- Purpose: Programmatically opens guild bank by manipulating WoW UI panels
--- Dependencies: findGuildBankFrame utility function
 -- Called by: BANKFRAME_OPENED event handler
-function SpoofGossip()
+function SpoofGuildBankGossip()
   UIPanelWindows.GossipFrame.pushable = 99
-  local centerFrame = (GetCenterFrame())
-  HideUIPanel(centerFrame)
-  ShowUIPanel(centerFrame)
+  CloseWindows(nil, GossipFrame)
   GuildBank.gossipOpen = true
   GossipFrame:SetAlpha(0)
   GossipFrame:EnableMouse(nil)
@@ -266,9 +249,6 @@ function SpoofGossip()
     GuildBankFrame:Show()
   end
 end
-
--- Provide GuildBank globally so other addons don't have to search for it
-GuildBank = findGuildBankFrame()
 GuildBankster = CreateFrame("Frame")
 
 function GuildBankster:Deposit(tab,gbank_slot,bag,inv_slot,count)
@@ -307,7 +287,7 @@ function GuildBankster:BANKFRAME_OPENED()
   if not banker or banker.city ~= GetRealZoneText() then return end
   GuildBankster.bank_open = true
 
-  SpoofGossip()
+  SpoofGuildBankGossip()
 end
 
 function GuildBankster:BANKFRAME_CLOSED()
@@ -407,7 +387,7 @@ local function CreateTemplateTab()
   if not GuildBankFrame then return end
 
   -- Create the Template tab button using the same template as other bottom tabs
-  local templateTab = CreateFrame("Button", "GuildBankFrameBottomTab4", GuildBankFrame, "TWGuildFrameBottomTabButtonTemplate")
+  local templateTab = CreateFrame("Button", "GuildBankFrameBottomTab4", GuildBankFrame, "GuildBankFrameBottomTabButtonTemplate")
   templateTab:SetPoint("LEFT", GuildBankFrameBottomTab3, "RIGHT", -10, 0)
   templateTab:SetID(4)
   templateTab:SetText("Templates")
@@ -418,28 +398,23 @@ local function CreateTemplateTab()
   end)
 
   -- Create Restock button using the same tab template style
-  local restockButton = CreateFrame("Button", "GuildBankFrameRestockButton", GuildBankFrame, "GuildBankFrameTabIconButtonTemplate")
+  local restockButton = CreateFrame("CheckButton", "GuildBankFrameRestockButton", GuildBankFrame, "GuildBankFrameTabButtonTemplate")
   restockButton:SetPoint("BOTTOMLEFT", "GuildBankFrame", "BOTTOMRIGHT", -3, 35)
-  restockButton:SetText("Restock")
-  restockButton:SetWidth(39)
-  restockButton:SetHeight(39)
-
   restockButton:SetNormalTexture("Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Up")
   restockButton:SetPushedTexture("Interface\\Glues\\CharacterCreate\\UI-RotationRight-Big-Down")
+  local normal = restockButton:GetNormalTexture()
+  normal:ClearAllPoints()
+  normal:SetWidth(64)
+  normal:SetHeight(64)
+  normal:SetPoint("CENTER", restockButton, "CENTER", 0, 0)
+  local pushed = restockButton:GetPushedTexture()
+  pushed:ClearAllPoints()
+  pushed:SetWidth(64)
+  pushed:SetHeight(64)
+  pushed:SetPoint("CENTER", restockButton, "CENTER", 0, 0)
 
-  -- Tooltip for restock button
-  restockButton:SetScript("OnEnter", function()
-    GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
-    GameTooltip:SetText("Restock Guild Bank", 1, 1, 1)
-    GameTooltip:AddLine("Automatically restocks the guild bank based on your defined templates.", 0.8, 0.8, 0.8, 1)
-    GameTooltip:AddLine(" ")
-    GameTooltip:AddLine("Click to restock items from your inventory and personal bank.", 0.7, 0.7, 0.7, 1)
-    GameTooltip:Show()
-  end)
-
-  restockButton:SetScript("OnLeave", function()
-    GameTooltip:Hide()
-  end)
+  restockButton.tooltip = "Restock Guild Bank"
+  restockButton.tooltip2 = "Automatically restocks the guild bank based on your defined templates.\n\nClick to restock items from your inventory and personal bank."
 
   -- Click handler for restock button
   restockButton:SetScript("OnClick", function()
@@ -625,7 +600,7 @@ function GuildBankster_TemplateTab_OnClick()
   -- Enable guild bank tabs (same as tab 1) and register for right-click
   if GuildBank and GuildBank.tabs then
     for i = 1, GuildBank.tabs.numTabs do
-      local tab = _G["GuildBankFrameTab" .. i]
+      local tab = _G["GuildBankFrameGuildTab" .. i]
       if tab then
         tab:Enable()
         SetDesaturation(tab:GetNormalTexture(), 0)
@@ -648,8 +623,8 @@ function GuildBankster_TemplateTab_OnClick()
   end
 
   -- Simulate a click on the current template tab to update title and display
-  if _G["GuildBankFrameTab" .. CurrentTemplateTab] then
-    _G["GuildBankFrameTab" .. CurrentTemplateTab]:Click()
+  if _G["GuildBankFrameGuildTab" .. CurrentTemplateTab] then
+    _G["GuildBankFrameGuildTab" .. CurrentTemplateTab]:Click()
   end
 end
 
@@ -659,7 +634,7 @@ function GuildBankster_UpdateTabsForTemplateMode()
 
   -- Update each tab's appearance and tooltip
   for i = 1, MAX_TABS do
-    local tab = _G["GuildBankFrameTab" .. i]
+    local tab = _G["GuildBankFrameGuildTab" .. i]
     if tab then
       local isActive = CurrentGuildSettings.templateActiveStates[i] or false
 
@@ -695,7 +670,7 @@ end
 -- Restore guild bank tab appearance and tooltips when leaving template mode
 function GuildBankster_RestoreTabsFromTemplateMode()
   for i = 1, MAX_TABS do
-    local tab = _G["GuildBankFrameTab" .. i]
+    local tab = _G["GuildBankFrameGuildTab" .. i]
     if tab and tab.originalOnEnter then
       -- Restore original OnEnter script
       tab:SetScript("OnEnter", tab.originalOnEnter)
@@ -1045,14 +1020,14 @@ local function GuildBankster_Tab_OnClick(id)
   -- Left-click: switch templates
   -- Uncheck all tabs first (like the original does)
   for i = 1, MAX_TABS do
-    local tab = _G["GuildBankFrameTab"..i]
+    local tab = _G["GuildBankFrameGuildTab"..i]
     if tab then
       tab:SetChecked(false)
     end
   end
 
   -- Check the clicked tab
-  local clickedTab = _G["GuildBankFrameTab"..id]
+  local clickedTab = _G["GuildBankFrameGuildTab"..id]
   if clickedTab then
     clickedTab:SetChecked(true)
   end
@@ -1602,7 +1577,10 @@ function GuildBankster:RestockBankster_NextJob()
     end
     -- clear for next run
     for k in pairs(missing_totals) do missing_totals[k] = nil end
-    continuation_active = false  -- Clear continuation state when done
+    continuation_active = false
+    if GuildBankFrameRestockButton then
+      GuildBankFrameRestockButton:SetChecked(false)
+    end
     return
   end
 

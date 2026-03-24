@@ -237,7 +237,7 @@ end
 -- Called by: BANKFRAME_OPENED event handler
 function SpoofGuildBankGossip()
   UIPanelWindows.GossipFrame.pushable = 99
-  CloseWindows(nil, GossipFrame)
+  -- CloseWindows(nil, GossipFrame)
   GuildBank.gossipOpen = true
   GossipFrame:SetAlpha(0)
   GossipFrame:EnableMouse(nil)

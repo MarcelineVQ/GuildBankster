@@ -1,0 +1,122 @@
+<Ui xmlns="http://www.blizzard.com/wow/ui/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.blizzard.com/wow/ui/..\FrameXML\UI.xsd">
+	<Button name="GuildBankFrameBottomTabButtonTemplate" inherits="CharacterFrameTabButtonTemplate" virtual="true">
+		<Scripts>
+			<OnLoad>
+				this:SetFrameLevel(this:GetFrameLevel() + 4)
+			</OnLoad>
+			<OnClick>
+				PanelTemplates_Tab_OnClick(GuildBankFrame)
+				GuildBankFrameBottomTab_OnClick(this:GetID())
+			</OnClick>
+			<OnShow>
+				PanelTemplates_TabResize(0)
+				_G[this:GetName().."HighlightTexture"]:SetWidth(this:GetTextWidth() + 30)
+			</OnShow>
+		</Scripts>
+	</Button>
+	<CheckButton name="GuildBankFrameTabButtonTemplate" virtual="true" hidden="true">
+		<Size x="32" y="32"/>
+		<Layers>
+			<Layer level="BACKGROUND">
+				<Texture file="Interface\GuildBankFrame\UI-GuildBankFrame-Tab">
+					<Size x="64" y="64"/>
+					<Anchors>
+						<Anchor point="TOPLEFT">
+							<Offset x="-3" y="11"/>
+						</Anchor>
+					</Anchors>
+				</Texture>
+			</Layer>
+		</Layers>
+		<Scripts>
+			<OnLoad>
+				this:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+			</OnLoad>
+			<OnEnter>
+				GameTooltip:SetOwner(this, "ANCHOR_RIGHT")
+				GameTooltip:SetText(this.tooltip, 1, 1, 1, 1)
+				GameTooltip:AddLine(this.tooltip2)
+				GameTooltip:Show()
+			</OnEnter>
+			<OnLeave>
+				GameTooltip:Hide()
+			</OnLeave>
+			<OnClick>
+				GuildBankFrameTab_OnClick(this:GetID())
+			</OnClick>
+		</Scripts>
+		<NormalTexture/>
+		<HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+		<CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+	</CheckButton>
+	<Button name="GuildBankFrameItemButtonTemplate" inherits="ItemButtonTemplate" virtual="true" hidden="true">
+		<Layers>
+			<Layer level="ARTWORK">
+				<Texture name="$parentShine" file="Interface\ComboFrame\ComboPoint" alphaMode="ADD" hidden="true">
+					<Size x="32" y="32"/>
+					<Anchors>
+						<Anchor point="CENTER">
+							<Offset x="3" y="3"/>
+						</Anchor>
+					</Anchors>
+					<TexCoords left="0.5625" right="1" top="0" bottom="1"/>
+				</Texture>
+			</Layer>
+		</Layers>
+		<Scripts>
+			<OnLoad>
+				this:RegisterForDrag("LeftButton", "LeftButtonUp")
+				this:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+			</OnLoad>
+			<OnClick>
+				GuildBankSlot_OnClick(arg1)
+			</OnClick>
+			<OnDragStart>
+				GuildBankSlot_OnDragStart()
+			</OnDragStart>
+			<OnReceiveDrag>
+				GuildBankSlot_OnReceiveDrag()
+			</OnReceiveDrag>
+			<OnEnter>
+				GuildBankSlot_OnEnter()
+			</OnEnter>
+			<OnLeave>
+				GameTooltip:Hide()
+			</OnLeave>
+		</Scripts>
+	</Button>
+	<CheckButton name="GuildBankFrameTabIconButtonTemplate" virtual="true" hidden="true">
+		<Size x="36" y="36"/>
+		<Layers>
+			<Layer level="BORDER">
+				<Texture name="$parentIconTexture"/>
+			</Layer>
+		</Layers>
+		<NormalTexture/>
+		<HighlightTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+		<PushedTexture file="Interface\Buttons\ButtonHilight-Square" alphaMode="ADD"/>
+		<CheckedTexture file="Interface\Buttons\CheckButtonHilight" alphaMode="ADD"/>
+		<Scripts>
+			<OnClick>
+				GuildBankFrameWithdrawalsIcon_OnClick()
+			</OnClick>
+		</Scripts>
+	</CheckButton>
+	<ScrollingMessageFrame name="GuildBankFrameLogTemplate" toplevel="true" displayDuration="1120.0" maxLines="512" enableMouse="true" hidden="true" virtual="true">
+		<Size x="710" y="302"/>
+		<Anchors>
+			<Anchor point="TOPLEFT">
+				<Offset x="33" y="-73"/>
+			</Anchor>
+		</Anchors>
+		<Scripts>
+			<OnMouseWheel>
+				ChatFrame_OnMouseWheel(arg1)
+			</OnMouseWheel>
+			<OnHyperlinkClick>
+				ChatFrame_OnHyperlinkShow(arg1, arg2, arg3)
+			</OnHyperlinkClick>
+		</Scripts>
+		<FontString inherits="ChatFontNormal" justifyH="LEFT"/>
+	</ScrollingMessageFrame>
+</Ui>

@@ -387,10 +387,12 @@ local function CreateTemplateTab()
   if not GuildBankFrame then return end
 
   -- Create the Template tab button using the same template as other bottom tabs
-  local templateTab = CreateFrame("Button", "GuildBankFrameBottomTab4", GuildBankFrame, "GuildBankFrameBottomTabButtonTemplate")
-  templateTab:SetPoint("LEFT", GuildBankFrameBottomTab3, "RIGHT", -10, 0)
+  local templateTab = CreateFrame("Button", "GuildBankFrameTab4", GuildBankFrame, "GuildBankFrameBottomTabButtonTemplate")
+  templateTab:SetPoint("LEFT", GuildBankFrameTab3, "RIGHT", -10, 0)
   templateTab:SetID(4)
   templateTab:SetText("Templates")
+  PanelTemplates_SetNumTabs(GuildBankFrame, 4)
+  PanelTemplates_SetTab(GuildBankFrame, GuildBank and GuildBank.BottomTab or 1)
 
   -- Click handler
   templateTab:SetScript("OnClick", function()
@@ -576,10 +578,8 @@ function GuildBankster_TemplateTab_OnClick()
     end
   end
 
-  -- Set initial template tab to current guild bank tab if not set
-  if not CurrentTemplateTab then
-    CurrentTemplateTab = (GuildBank and GuildBank.currentTab) or 1
-  end
+  -- Always reflect the currently viewed guild bank tab
+  CurrentTemplateTab = (GuildBank and GuildBank.currentTab) or 1
 
   -- Hide all other content frames (same as original bottom tab system)
   if GuildBankFrameSlots then GuildBankFrameSlots:Hide() end
@@ -612,15 +612,8 @@ function GuildBankster_TemplateTab_OnClick()
   -- Update display
   GuildBankster_UpdateTemplateDisplay()
 
-  -- Update bottom tab states (disable others, enable template tab)
-  if GuildBankFrameBottomTab_Disable then
-    GuildBankFrameBottomTab_Disable(GuildBankFrameBottomTab1)
-    GuildBankFrameBottomTab_Disable(GuildBankFrameBottomTab2)
-    GuildBankFrameBottomTab_Disable(GuildBankFrameBottomTab3)
-  end
-  if GuildBankFrameBottomTab_Enable then
-    GuildBankFrameBottomTab_Enable(GuildBankFrameBottomTab4)
-  end
+  -- Update bottom tab states - select template tab (4)
+  PanelTemplates_SetTab(GuildBankFrame, 4)
 
   -- Simulate a click on the current template tab to update title and display
   if _G["GuildBankFrameGuildTab" .. CurrentTemplateTab] then
@@ -976,9 +969,7 @@ local function GuildBankster_BottomTab_OnClick(id)
     if GuildBankFrameBottomTab_OnClick_Original then
       local result = GuildBankFrameBottomTab_OnClick_Original(id)
       -- Make sure template tab is properly disabled when other tabs are active
-      if GuildBankFrameBottomTab4 and GuildBankFrameBottomTab_Disable then
-        GuildBankFrameBottomTab_Disable(GuildBankFrameBottomTab4)
-      end
+      -- Template tab deselected when other bottom tabs are clicked (handled by PanelTemplates)
       return result
     end
   end
